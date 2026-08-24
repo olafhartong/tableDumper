@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -44,6 +45,7 @@ type config struct {
 	ADXMapping                string
 	ADXUploadFile             string
 	ADXBatchSize              int
+	ADXAuthMode               string
 	ADXTenantID               string
 	ADXClientID               string
 	ADXClientSecret           string
@@ -55,6 +57,12 @@ type config struct {
 	BloodHoundUploadGenerated bool
 	BloodHoundUploadFile      string
 	BloodHoundUploadIconsFile string
+	Pseudonymize              bool
+	PseudonymizeFilenames     bool
+	PseudonymMap              string
+	PseudonymFields           string
+	PseudonymReplacementsFile string
+	PseudonymMapRetention     string
 	Endpoint                  string
 	Resource                  string
 	LoginBaseURL              string
@@ -73,7 +81,7 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	fs := flag.NewFlagSet("tableDumper", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
-	fs.StringVar(&cfg.AuthMode, "auth", "auto", "Authentication mode: auto, sp, or azcli")
+	fs.StringVar(&cfg.AuthMode, "auth", "auto", "Authentication mode: auto, sp, azcli, or none")
 	fs.StringVar(&cfg.TenantID, "tenant-id", envOrDotEnv("AZURE_TENANT_ID", dotenv), "Microsoft Entra tenant ID")
 	fs.StringVar(&cfg.ClientID, "client-id", envOrDotEnv("AZURE_CLIENT_ID", dotenv), "Service principal client ID")
 	fs.StringVar(&cfg.ClientSecret, "client-secret", envOrDotEnv("AZURE_CLIENT_SECRET", dotenv), "Service principal client secret")
@@ -82,8 +90,8 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&cfg.DumpTable, "dump-table", "", "Defender advanced hunting table name to dump")
 	fs.StringVar(&cfg.DumpLookback, "dump-lookback", defaultDumpLookback, "Lookback timespan for -dump-table, for example 30d, 12h, or 90m")
 	fs.StringVar(&cfg.DumpTimeColumn, "dump-time-column", "Timestamp", "Time column used for -dump-table lookback filtering")
-	fs.IntVar(&cfg.DumpRowLimit, "dump-row-limit", defaultDumpRowLimit, "Maximum rows to request per table dump query before partitioning")
-	fs.IntVar(&cfg.DumpParallelism, "dump-parallelism", 4, "Maximum number of table dump chunks to query in parallel")
+	fs.IntVar(&cfg.DumpRowLimit, "dump-row-limit", defaultDumpRowLimit, "Maximum rows per advanced hunting query chunk before partitioning")
+	fs.IntVar(&cfg.DumpParallelism, "dump-parallelism", 1, "Deprecated compatibility flag; partition requests are always sequential")
 	fs.StringVar(&cfg.Output, "output", defaultOutputFile, "Path to the JSON output file")
 	fs.BoolVar(&cfg.ADXExport, "adx-export", false, "Also write Azure Data Explorer ingestion artifacts")
 	fs.BoolVar(&cfg.OpenGraphExport, "opengraph-export", false, "Also write a BloodHound OpenGraph JSON payload")
@@ -93,6 +101,7 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&cfg.ADXMapping, "adx-mapping", "", "ADX ingestion mapping name to use in the generated schema file")
 	fs.StringVar(&cfg.ADXUploadFile, "adx-upload-file", "", "Path to a JSON/NDJSON file to upload to ADX")
 	fs.IntVar(&cfg.ADXBatchSize, "adx-batch-size", 500, "Number of rows to include in each ADX ingestion request")
+	fs.StringVar(&cfg.ADXAuthMode, "adx-auth", envOrDotEnvAny(dotenv, "ADX_AUTH"), "Authentication mode override for ADX uploads: auto, sp, azcli, or none")
 	fs.StringVar(&cfg.ADXTenantID, "adx-tenant-id", envOrDotEnvAny(dotenv, "ADX_TENANT_ID"), "Microsoft Entra tenant ID to use for ADX")
 	fs.StringVar(&cfg.ADXClientID, "adx-client-id", envOrDotEnvAny(dotenv, "ADX_CLIENT_ID"), "Service principal client ID to use for ADX")
 	fs.StringVar(&cfg.ADXClientSecret, "adx-client-secret", envOrDotEnvAny(dotenv, "ADX_CLIENT_SECRET"), "Service principal client secret to use for ADX")
@@ -104,6 +113,12 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	fs.BoolVar(&cfg.BloodHoundUploadGenerated, "bloodhound-upload-generated", false, "After OpenGraph export, upload generated graph and icon files to BloodHound")
 	fs.StringVar(&cfg.BloodHoundUploadFile, "bloodhound-upload-file", "", "Path to an OpenGraph JSON or ZIP file to upload to BloodHound")
 	fs.StringVar(&cfg.BloodHoundUploadIconsFile, "bloodhound-upload-icons-file", "", "Path to a BloodHound custom node icon payload to upload")
+	fs.BoolVar(&cfg.Pseudonymize, "pseudonymize", false, "Pseudonymize identifiers with embedded NER before writing collected data")
+	fs.BoolVar(&cfg.PseudonymizeFilenames, "pseudonymize-filenames", false, "Also pseudonymize linked filenames in file, path, and process command-line fields")
+	fs.StringVar(&cfg.PseudonymMap, "pseudonym-map", "", "Path to a reusable pseudonym mapping file (a secure temporary file is created when omitted)")
+	fs.StringVar(&cfg.PseudonymFields, "pseudonym-fields", envOrDotEnvAny(dotenv, "PSEUDONYM_FIELDS"), "Override the built-in table field allowlist; comma-separated with * and ? wildcards")
+	fs.StringVar(&cfg.PseudonymReplacementsFile, "pseudonym-replacements-file", envOrDotEnvAny(dotenv, "PSEUDONYM_REPLACEMENTS_FILE"), "Path to a JSON file of literal word and phrase replacements")
+	fs.StringVar(&cfg.PseudonymMapRetention, "pseudonym-map-retention", "keep", "Mapping file retention after collection: keep or delete")
 	fs.StringVar(&cfg.Endpoint, "endpoint", defaultEndpoint, "Defender for Endpoint API base URL")
 	fs.StringVar(&cfg.Resource, "resource", defaultResource, "OAuth resource/audience for the access token")
 	fs.StringVar(&cfg.LoginBaseURL, "login-base-url", defaultLoginBaseURL, "Microsoft Entra login base URL")
@@ -127,9 +142,9 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 
 	cfg.AuthMode = strings.ToLower(strings.TrimSpace(cfg.AuthMode))
 	switch cfg.AuthMode {
-	case "auto", "sp", "azcli":
+	case "auto", "sp", "azcli", "none":
 	default:
-		return cfg, fmt.Errorf("unsupported -auth value %q; expected auto, sp, or azcli", cfg.AuthMode)
+		return cfg, fmt.Errorf("unsupported -auth value %q; expected auto, sp, azcli, or none", cfg.AuthMode)
 	}
 
 	cfg.Endpoint = strings.TrimRight(strings.TrimSpace(cfg.Endpoint), "/")
@@ -141,6 +156,7 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	cfg.ADXCluster = strings.TrimRight(strings.TrimSpace(cfg.ADXCluster), "/")
 	cfg.ADXDatabase = strings.TrimSpace(cfg.ADXDatabase)
 	cfg.ADXUploadFile = strings.TrimSpace(cfg.ADXUploadFile)
+	cfg.ADXAuthMode = strings.ToLower(strings.TrimSpace(cfg.ADXAuthMode))
 	cfg.ADXResource = strings.TrimRight(strings.TrimSpace(cfg.ADXResource), "/")
 	cfg.BloodHoundURL = strings.TrimRight(strings.TrimSpace(cfg.BloodHoundURL), "/")
 	cfg.BloodHoundToken = strings.TrimSpace(cfg.BloodHoundToken)
@@ -148,8 +164,19 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	cfg.BloodHoundTokenKey = strings.TrimSpace(cfg.BloodHoundTokenKey)
 	cfg.BloodHoundUploadFile = strings.TrimSpace(cfg.BloodHoundUploadFile)
 	cfg.BloodHoundUploadIconsFile = strings.TrimSpace(cfg.BloodHoundUploadIconsFile)
+	cfg.PseudonymMap = strings.TrimSpace(cfg.PseudonymMap)
+	cfg.PseudonymFields = strings.TrimSpace(cfg.PseudonymFields)
+	cfg.PseudonymReplacementsFile = strings.TrimSpace(cfg.PseudonymReplacementsFile)
+	cfg.PseudonymMapRetention = strings.ToLower(strings.TrimSpace(cfg.PseudonymMapRetention))
 	if cfg.ADXResource == "" {
 		cfg.ADXResource = defaultADXResource
+	}
+	if cfg.ADXAuthMode != "" {
+		switch cfg.ADXAuthMode {
+		case "auto", "sp", "azcli", "none":
+		default:
+			return cfg, fmt.Errorf("unsupported -adx-auth value %q; expected auto, sp, azcli, or none", cfg.ADXAuthMode)
+		}
 	}
 
 	if cfg.Output == "" {
@@ -223,8 +250,58 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 			return cfg, errors.New("bloodhound signed requests require both -bloodhound-token-id and -bloodhound-token-key")
 		}
 	}
+	if cfg.Pseudonymize && cfg.DumpTable == "" && !hasQueryInput(cfg) {
+		return cfg, errors.New("pseudonymization requires -query, -query-file, or -dump-table")
+	}
+	if !cfg.Pseudonymize && cfg.PseudonymMap != "" {
+		return cfg, errors.New("-pseudonym-map requires -pseudonymize")
+	}
+	if cfg.PseudonymizeFilenames && !cfg.Pseudonymize {
+		return cfg, errors.New("-pseudonymize-filenames requires -pseudonymize")
+	}
+	if !cfg.Pseudonymize && cfg.PseudonymReplacementsFile != "" {
+		return cfg, errors.New("-pseudonym-replacements-file requires -pseudonymize")
+	}
+	if cfg.PseudonymFields != "" {
+		if _, err := newPseudonymFieldPolicy(cfg.PseudonymFields); err != nil {
+			return cfg, fmt.Errorf("invalid -pseudonym-fields: %w", err)
+		}
+	}
+	if cfg.PseudonymMap != "" && cfg.PseudonymReplacementsFile != "" && samePath(cfg.PseudonymMap, cfg.PseudonymReplacementsFile) {
+		return cfg, errors.New("-pseudonym-map and -pseudonym-replacements-file must use different paths")
+	}
+	artifactPaths := []string{cfg.Output}
+	if cfg.ADXExport {
+		dataPath, schemaPath := adxArtifactPaths(cfg.Output)
+		artifactPaths = append(artifactPaths, dataPath, schemaPath)
+	}
+	if cfg.OpenGraphExport {
+		artifactPaths = append(artifactPaths, openGraphArtifactPath(cfg.Output), openGraphIconArtifactPath(cfg.Output))
+	}
+	for _, artifactPath := range artifactPaths {
+		if cfg.PseudonymMap != "" && samePath(cfg.PseudonymMap, artifactPath) {
+			return cfg, fmt.Errorf("-pseudonym-map must not use an output artifact path: %s", artifactPath)
+		}
+		if cfg.PseudonymReplacementsFile != "" && samePath(cfg.PseudonymReplacementsFile, artifactPath) {
+			return cfg, fmt.Errorf("-pseudonym-replacements-file must not use an output artifact path: %s", artifactPath)
+		}
+	}
+	switch cfg.PseudonymMapRetention {
+	case "keep", "delete":
+	default:
+		return cfg, fmt.Errorf("unsupported -pseudonym-map-retention value %q; expected keep or delete", cfg.PseudonymMapRetention)
+	}
 
 	return cfg, nil
+}
+
+func samePath(left, right string) bool {
+	leftPath, leftErr := filepath.Abs(filepath.Clean(left))
+	rightPath, rightErr := filepath.Abs(filepath.Clean(right))
+	if leftErr != nil || rightErr != nil {
+		return filepath.Clean(left) == filepath.Clean(right)
+	}
+	return leftPath == rightPath
 }
 
 func newHTTPClient(timeout time.Duration, insecureSkipVerify bool) *http.Client {
@@ -384,8 +461,12 @@ func mdeAuthConfig(cfg config) authConfig {
 }
 
 func adxAuthConfig(cfg config) authConfig {
+	authMode := cfg.ADXAuthMode
+	if authMode == "" {
+		authMode = cfg.AuthMode
+	}
 	return authConfig{
-		AuthMode:     cfg.AuthMode,
+		AuthMode:     authMode,
 		TenantID:     cfg.ADXTenantID,
 		ClientID:     cfg.ADXClientID,
 		ClientSecret: cfg.ADXClientSecret,

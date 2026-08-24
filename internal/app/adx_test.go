@@ -335,6 +335,52 @@ func TestUploadFileToADX(t *testing.T) {
 	}
 }
 
+func TestUploadFileToADXWithoutAuthentication(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "rows.json")
+	if err := os.WriteFile(filePath, []byte(`[{"DeviceName":"host1"}]`), 0o600); err != nil {
+		t.Fatalf("write upload file: %v", err)
+	}
+
+	var mgmtRequests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/rest/mgmt" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if value, present := r.Header["Authorization"]; present {
+			t.Fatalf("unexpected Authorization header %#v", value)
+		}
+		mgmtRequests++
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"Tables":[]}`)
+	}))
+	defer server.Close()
+
+	cfg := config{
+		AuthMode:      "azcli",
+		ADXAuthMode:   "none",
+		ADXCluster:    server.URL,
+		ADXDatabase:   "TestDB",
+		ADXTable:      "DefenderEvents",
+		ADXUploadFile: filePath,
+		ADXBatchSize:  500,
+	}
+
+	rowsUploaded, batchesUploaded, authMode, err := uploadFileToADX(context.Background(), server.Client(), cfg)
+	if err != nil {
+		t.Fatalf("uploadFileToADX returned error: %v", err)
+	}
+	if rowsUploaded != 1 || batchesUploaded != 1 {
+		t.Fatalf("unexpected upload result: %d rows in %d batches", rowsUploaded, batchesUploaded)
+	}
+	if authMode != "none" {
+		t.Fatalf("unexpected auth mode %q", authMode)
+	}
+	if mgmtRequests != 3 {
+		t.Fatalf("unexpected management request count %d", mgmtRequests)
+	}
+}
+
 func TestInspectADXMgmtResponseDetectsEmptyInlineIngest(t *testing.T) {
 	body := []byte(`{
 		"Tables": [{

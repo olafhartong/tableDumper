@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -40,6 +41,44 @@ func TestRunAdvancedQuery(t *testing.T) {
 	}
 	if !strings.Contains(string(body), `"DeviceName":"host1"`) {
 		t.Fatalf("unexpected body %s", string(body))
+	}
+}
+
+func TestRunAdvancedQueryRetriesThrottleResponse(t *testing.T) {
+	attempts := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		readAdvancedQueryRequest(t, r)
+		attempts++
+		if attempts == 1 {
+			w.Header().Set("Retry-After", "0")
+			w.WriteHeader(http.StatusTooManyRequests)
+			io.WriteString(w, `{"error":{"code":"CpuQuotaExceeded","message":"You have exceeded processing resources allocated to this tenant"}}`)
+			return
+		}
+		io.WriteString(w, `{"Results":[{"DeviceName":"host1"}]}`)
+	}))
+	defer server.Close()
+
+	var progress bytes.Buffer
+	_, response, err := runAdvancedQueryWithProgress(context.Background(), server.Client(), server.URL, "token-value", "DeviceInfo | limit 1", &progress)
+	if err != nil {
+		t.Fatalf("runAdvancedQueryWithProgress returned error: %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("unexpected attempt count %d", attempts)
+	}
+	if len(response.Results) != 1 {
+		t.Fatalf("unexpected response %#v", response)
+	}
+	if !strings.Contains(progress.String(), "[!] advanced query throttled (429); waiting 0s before retrying") {
+		t.Fatalf("unexpected progress %q", progress.String())
+	}
+}
+
+func TestAdvancedQueryRetryDelayUsesQuotaMessage(t *testing.T) {
+	body := []byte(`{"error":{"code":"CpuQuotaExceeded","message":"You have exceeded processing resources allocated to this tenant. You can run queries again in 2871 seconds"}}`)
+	if got := advancedQueryRetryDelay(nil, body, 1, time.Now()); got != 2871*time.Second {
+		t.Fatalf("unexpected retry delay %s", got)
 	}
 }
 

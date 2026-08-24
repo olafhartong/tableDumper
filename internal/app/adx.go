@@ -349,7 +349,9 @@ func runADXMgmtCommand(ctx context.Context, httpClient *http.Client, cluster, da
 	if err != nil {
 		return fmt.Errorf("build ADX management request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 

@@ -1,0 +1,2 @@
+DeviceEvents
+| where Timestamp between (datetime(2026-08-19T13:37:00) .. datetime(2026-08-20T00:13:37))

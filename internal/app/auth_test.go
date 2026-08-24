@@ -20,6 +20,11 @@ func TestResolveAuthMode(t *testing.T) {
 			want: "azcli",
 		},
 		{
+			name: "explicit none",
+			cfg:  authConfig{AuthMode: "none"},
+			want: "none",
+		},
+		{
 			name: "auto prefers service principal",
 			cfg: authConfig{
 				AuthMode:     "auto",
@@ -42,6 +47,19 @@ func TestResolveAuthMode(t *testing.T) {
 				t.Fatalf("resolveAuthMode() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestAcquireTokenNone(t *testing.T) {
+	token, mode, err := acquireToken(context.Background(), http.DefaultClient, authConfig{AuthMode: "none"})
+	if err != nil {
+		t.Fatalf("acquireToken returned error: %v", err)
+	}
+	if token != "" {
+		t.Fatalf("expected empty token, got %q", token)
+	}
+	if mode != "none" {
+		t.Fatalf("expected none mode, got %q", mode)
 	}
 }
 

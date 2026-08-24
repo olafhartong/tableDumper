@@ -35,6 +35,8 @@ func acquireToken(ctx context.Context, httpClient *http.Client, cfg authConfig) 
 		token, err = getServicePrincipalToken(ctx, httpClient, cfg)
 	case "azcli":
 		token, err = getAzureCLIToken(ctx, cfg)
+	case "none":
+		// Anonymous endpoints do not require token acquisition.
 	default:
 		err = fmt.Errorf("internal error: unsupported auth mode %q", mode)
 	}

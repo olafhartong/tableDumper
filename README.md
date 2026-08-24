@@ -2,11 +2,12 @@
 
 Small Go CLI to:
 
-- run a Microsoft Defender XDR advanced hunting query through Microsoft Graph and write the JSON response to disk
+- run a Microsoft Defender XDR advanced hunting query through Microsoft Graph, automatically partitioning large result sets, and write the JSON response to disk
 - dump a whole Defender XDR advanced hunting table over a lookback window, partitioning large dumps into chunks automatically
 - generate Azure Data Explorer ingestion artifacts from those results
 - generate a BloodHound OpenGraph JSON payload from graph-shaped Defender results
 - upload a JSON file into an Azure Data Explorer table in configurable batches
+- pseudonymize collected identifiers with an embedded NER model before any result is written
 
 ## What it does
 
@@ -16,16 +17,21 @@ Small Go CLI to:
   - Azure CLI credentials from `az login`
 - Writes the API response to a pretty-printed JSON file
 - Can dump an entire table by name with a default `30d` lookback
-- Counts matching rows before dumping and uses hash-partitioned chunk queries when the result set exceeds `30000` rows
+- Counts query and table-dump results first, then uses hash-partitioned chunk queries when a result set reaches `30000` rows or Defender rejects an unpartitioned query for exceeding its result-size limit
 - Optionally writes Azure Data Explorer ingestion artifacts
 - Optionally writes a BloodHound OpenGraph JSON payload
 - Optionally uploads JSON data into Azure Data Explorer
+- Optionally replaces people, organizations, accounts, hosts, domains, network addresses, and identifiers with consistent realistic pseudonyms
 
 ## Build
 
 ```bash
 go build -o tableDumper .
 ```
+
+## Documentation
+
+Detailed documentation for every command-line flag is available in [docs/README.md](docs/README.md), including focused guides for collection, authentication, pseudonymization, Azure Data Explorer, and BloodHound/OpenGraph workflows.
 
 ## Modes
 
@@ -78,6 +84,17 @@ go build -o tableDumper .
   --adx-database SecurityData \
   --adx-table DefenderEvents \
   --adx-upload-file defender-results.adx.json
+```
+
+### 6. Pseudonymize a collection
+
+```bash
+./tableDumper \
+  --auth azcli \
+  --dump-table DeviceLogonEvents \
+  --output device-logons.json \
+  --pseudonymize \
+  --pseudonym-map ./collection.pseudonyms.json
 ```
 
 ## Authentication
@@ -150,6 +167,8 @@ Query from file:
 ./tableDumper --auth azcli --query-file query.kql --output results.json
 ```
 
+Query mode first counts the rows produced by the complete KQL pipeline. Results below `--dump-row-limit` are requested normally. Larger results are divided into deterministic hash partitions, requested sequentially, and streamed into the same `Schema`/`Results` JSON envelope used for small queries. If a result is below the row threshold but still exceeds Defender's byte-size limit, the tool automatically retries it with progressively smaller hash partitions.
+
 ## Table dump
 
 Use `--dump-table` to dump all rows from a Defender XDR advanced hunting table over a lookback window. The tool first runs a count query:
@@ -160,11 +179,11 @@ Use `--dump-table` to dump all rows from a Defender XDR advanced hunting table o
 | count
 ```
 
-If the count is below `30000`, it dumps the table directly. If the count is `30000` or higher, it counts hash partitions and then queries each non-empty partition in parallel, streaming each completed chunk to one JSON response file with the usual `Schema` and `Results` fields. Partitioned dumps do not keep the full result set in memory; only the active chunk responses are held while they are written.
+If the count is below `30000`, it dumps the table directly. If the count is `30000` or higher, it counts hash partitions and then queries each non-empty partition sequentially, streaming each completed chunk to one JSON response file with the usual `Schema` and `Results` fields. Sequential requests avoid exhausting the tenant's Defender hunting CPU quota. If Defender responds with HTTP 429, the tool pauses for the server-specified interval and retries instead of aborting the dump. Partitioned dumps do not keep the full result set in memory; only the current chunk response is held while it is written.
 
 When `--adx-export` is used with a partitioned dump, the ADX newline-delimited JSON sidecar is streamed at the same time as the main output file.
 
-`--opengraph-export` is only supported for non-partitioned table dumps because building the OpenGraph payload requires all rows in memory.
+`--opengraph-export` is only supported for non-partitioned queries and table dumps because building the OpenGraph payload requires all rows in memory.
 
 During a table dump, progress is written to stderr. It reports the matching row count, partition sizing, and each completed partition chunk. The final summary report is still written to stdout.
 
@@ -175,11 +194,96 @@ Example:
   --auth sp \
   --dump-table DeviceProcessEvents \
   --dump-lookback 14d \
-  --dump-parallelism 6 \
   --output device-process-events.json
 ```
 
 By default, the lookback filter uses the `Timestamp` column. Use `--dump-time-column` only for tables with a different time column.
+
+## NER-based pseudonymization
+
+Use `--pseudonymize` to transform downloaded rows before the main JSON response or any ADX/OpenGraph sidecar is written. The implementation follows the context-preserving approach from [zolderio/token-proxy](https://github.com/zolderio/token-proxy), adapted for local Defender data collection rather than LLM traffic.
+
+Pseudonymization is field-scoped. A value is inspected only when its column matches the active field allowlist; every other column, including nested content, is copied unchanged. For table dumps, the program selects a built-in policy keyed by `--dump-table`. Process/file/network event tables include their applicable account, email/UPN, filename, domain, device, folder-path, and Azure resource columns; narrower tables such as `DeviceInfo` and `EmailEvents` receive smaller policies. The built-ins also cover schema variants such as `UserPrincipal`, `HomeDirectory`, `FilePath`, `*Fqdn`, `Computer`, `ResourceGroup`, and the typed `_s`/`_g` suffixes used by custom Log Analytics columns. Ambiguous names such as `Name`, `User`, `Host`, `UserId`, and `Resource` are enabled only for tables where their schema description gives them one of those meanings. Arbitrary query mode and unknown tables use a conservative semantic fallback. All built-in policies deliberately exclude generic messages, general command-line content, named pipes, timestamps, versions, IP-address fields, SIDs, scope/type metadata, and unrelated identifiers. Credential masking within command-line fields is always applied as a safety exception.
+
+Semantically related fields are linked before replacement. Account families such as `AccountName`/`AccountUpn`/`AccountDomain` and `InitiatingProcessAccount*` reuse one generated identity even when their source strings differ. Missing selected identity components are synthesized from that account profile rather than mapping an empty string globally. A device FQDN in the event uses the primary account domain as its suffix. Existing inconsistent aliases from an older mapping vault are reconciled and saved as one coherent identity. Sender address/domain pairs and device hostname/FQDN/domain families behave similarly, and the aliases are retained in the mapping vault for consistency across rows and runs.
+
+Filenames are unchanged by default. Add `--pseudonymize-filenames` to replace them. When enabled, each process family stays internally consistent: `FileName`, the filename at the end of `FolderPath`, and executable references in `ProcessCommandLine` share one replacement; the corresponding initiating-process and parent-process families use their own replacements. Command-line matches may include or omit `.exe`, while partial names are left untouched.
+
+Sensitive values in `ProcessCommandLine`, `InitiatingProcessCommandLine`, and other command-line fields are always masked with `***` whenever `--pseudonymize` is enabled. This includes named username/password arguments, API keys and tokens, app/client IDs and secrets, tenant IDs, common cloud credential environment variables, connection strings, authorization headers, URL credentials, UPNs, and account identities known from the same event. Quoting and unrelated command-line arguments are preserved.
+
+For a strict table-specific selection, provide exact column names:
+
+```bash
+./tableDumper --dump-table DeviceProcessEvents --output processes.json \
+  --pseudonymize \
+  --pseudonym-fields 'AccountName,InitiatingProcessAccountName,FileName,InitiatingProcessFileName,DeviceName,FolderPath,InitiatingProcessFolderPath'
+```
+
+`--pseudonym-fields` overrides the built-in table policy. The override is case-insensitive and accepts `*` and `?` wildcards. Quote wildcard values in the shell. For example, `'*AccountName,*FileName,*FolderPath'` selects those column families. `PSEUDONYM_FIELDS` provides the same override through the environment. Using `'*'` restores broad content scanning, but increases false positives and is not recommended for routine collections.
+
+The pipeline combines:
+
+- an English NER model embedded in the Go binary for people and organizations
+- field-aware recognition for Defender account, device, tenant, domain, and object identifiers
+- regex recognition for emails, domains, IP addresses, SIDs, GUIDs, MAC addresses, phone numbers, and usernames in paths or `DOMAIN\\user` values
+- optional configured literal replacements for specific words and phrases
+- recursive handling of nested objects, arrays, and JSON stored inside string fields
+
+Pseudonyms look realistic and preserve useful structure. The same person, account, host, or identifier receives the same replacement everywhere while the same mapping file is in use. Host roles such as domain controller/server/workstation, private versus public IP context, and identifier formats are retained where possible.
+
+Without `--pseudonymize-filenames`, filenames remain original in all locations, including `C:\Windows`, `Program Files`, path basenames, and process command lines.
+
+Azure Resource IDs preserve their hierarchy. Subscription IDs, resource groups, and resource-name components are pseudonymized consistently, while structural segments such as `subscriptions`, `resourceGroups`, provider namespaces, and resource types remain intact. Standalone `SubscriptionId`, `ResourceGroup`, and `ResourceGroupName` fields use the same component mappings as the full resource paths.
+
+For values that need a specific replacement, create a JSON file such as:
+
+```json
+{
+  "case_sensitive": false,
+  "whole_words": true,
+  "replacements": [
+    {
+      "find": ["Contoso", "Contoso Ltd", "Contoso Corporation"],
+      "replace": "Northbridge Group"
+    },
+    {"find": "Project Falcon", "replace": "Project Aurora"},
+    {"find": "ACME+Ops", "replace": "Juniper Services"}
+  ]
+}
+```
+
+`find` accepts either one string or a list of strings. A list is useful for aliases that should all receive the same configured replacement. See [`examples/pseudonym-replacements.json`](examples/pseudonym-replacements.json) for a complete example.
+
+Then pass it with the collection:
+
+```bash
+./tableDumper --dump-table DeviceInfo --output devices.json \
+  --pseudonymize \
+  --pseudonym-map ./collection.pseudonyms.json \
+  --pseudonym-replacements-file ./replacements.json
+```
+
+These are literal replacements, not regular expressions, so characters such as `.`, `+`, `(`, and `\\` have no special meaning. Matching is case-insensitive and restricted to whole words by default. Set `case_sensitive` to `true` or `whole_words` to `false` to change those behaviors. Longer configured phrases win when rules overlap, and configured matches take precedence over NER and identifier recognition. Unmatched identifiers in the same value are still pseudonymized normally. Every alias is tracked separately in the mapping vault, even when several aliases share one replacement.
+
+Configured matches in selected fields are also recorded in the mapping vault, which detects attempts to reuse the vault with a different replacement. Protect the replacement configuration itself if its `find` values are sensitive. The path can also be supplied through `PSEUDONYM_REPLACEMENTS_FILE`.
+
+The mapping file is a sensitive, reversible vault: it contains both original values and their pseudonyms. It is written atomically with `0600` permissions. When `--pseudonym-map` is omitted, the tool creates a secure temporary mapping file and prints its path. To use consistent replacements across several table collections, keep the file and pass its path to each run:
+
+```bash
+./tableDumper --dump-table DeviceInfo --output devices.json \
+  --pseudonymize --pseudonym-map ./collection.pseudonyms.json
+
+./tableDumper --dump-table DeviceLogonEvents --output logons.json \
+  --pseudonymize --pseudonym-map ./collection.pseudonyms.json
+```
+
+After a successful collection, the mapping file is kept by default without prompting. To remove it automatically after a successful run, choose `delete` explicitly:
+
+```bash
+--pseudonym-map-retention delete
+```
+
+This is pseudonymization, not guaranteed anonymization. NER and pattern recognition can have false negatives, especially for non-English, obfuscated, image, or uncommon identifiers. Review representative output before using it for regulated or high-risk data.
 
 ## Azure Data Explorer export
 
@@ -306,8 +410,12 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 ## Command options
 
 `--auth`
-- Authentication mode: `auto`, `sp`, or `azcli`
+- Authentication mode: `auto`, `sp`, `azcli`, or `none`
 - Default: `auto`
+
+`--adx-auth`
+- Optional ADX-specific authentication override: `auto`, `sp`, `azcli`, or `none`
+- Defaults to the value of `--auth`
 
 `--tenant-id`
 - Microsoft Entra tenant ID for Microsoft Graph Defender XDR query auth
@@ -337,16 +445,40 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 - Default: `Timestamp`
 
 `--dump-row-limit`
-- Maximum rows per dump query before partitioning
+- Maximum rows per query or table-dump chunk before partitioning
 - Default: `30000`
 
 `--dump-parallelism`
-- Maximum number of partition chunks queried in parallel
-- Default: `4`
+- Deprecated compatibility flag; partition requests are always sequential regardless of its value
+- Default: `1`
 
 `--output`
-- Path for the raw query JSON response
+- Path for the query JSON response
 - Default: `results.json`
+
+`--pseudonymize`
+- Apply embedded NER and identifier pseudonymization before collected data is written
+
+`--pseudonymize-filenames`
+- Also replace filenames and keep matching path and process command-line references consistent
+- Requires `--pseudonymize`; default: disabled
+
+`--pseudonym-map`
+- Reusable sensitive mapping-vault path
+- When omitted, a secure temporary file is created
+
+`--pseudonym-fields`
+- Override the built-in per-table field policy with a comma-separated allowlist
+- Case-insensitive, with `*` and `?` wildcard support
+- Can also be set with `PSEUDONYM_FIELDS`
+
+`--pseudonym-replacements-file`
+- JSON file containing literal word and phrase replacements
+- Can also be set with `PSEUDONYM_REPLACEMENTS_FILE`
+
+`--pseudonym-map-retention`
+- Non-interactive mapping-file action after collection: `keep` or `delete`
+- Default: `keep`
 
 `--adx-export`
 - Write ADX helper files next to `--output`

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestBuildTableDumpQueries(t *testing.T) {
@@ -51,16 +52,15 @@ func TestDumpTableWithoutPartitioning(t *testing.T) {
 	defer server.Close()
 
 	cfg := config{
-		Endpoint:        server.URL,
-		DumpTable:       "DeviceInfo",
-		DumpLookback:    "30d",
-		DumpTimeColumn:  "Timestamp",
-		DumpRowLimit:    defaultDumpRowLimit,
-		DumpParallelism: 2,
-		Output:          filepath.Join(t.TempDir(), "deviceinfo.json"),
+		Endpoint:       server.URL,
+		DumpTable:      "DeviceInfo",
+		DumpLookback:   "30d",
+		DumpTimeColumn: "Timestamp",
+		DumpRowLimit:   defaultDumpRowLimit,
+		Output:         filepath.Join(t.TempDir(), "deviceinfo.json"),
 	}
 
-	output, err := dumpTable(context.Background(), server.Client(), cfg, "token-value", io.Discard)
+	output, err := dumpTable(context.Background(), server.Client(), cfg, "token-value", nil, io.Discard)
 	if err != nil {
 		t.Fatalf("dumpTable returned error: %v", err)
 	}
@@ -86,9 +86,73 @@ func TestDumpTableWithoutPartitioning(t *testing.T) {
 	}
 }
 
+func TestDumpTablePseudonymizesBeforeWriting(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := readAdvancedQueryRequest(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		switch query {
+		case "DeviceInfo\n| where Timestamp >= ago(30d)\n| count":
+			io.WriteString(w, `{"Results":[{"Count":1}]}`)
+		case "DeviceInfo\n| where Timestamp >= ago(30d)":
+			io.WriteString(w, `{"Schema":[{"Name":"AccountUpn","Type":"String"},{"Name":"DeviceName","Type":"String"}],"Results":[{"AccountUpn":"alice@contoso.com","DeviceName":"CONTOSO-DC-01"}]}`)
+		default:
+			t.Fatalf("unexpected query %q", query)
+		}
+	}))
+	defer server.Close()
+
+	directory := t.TempDir()
+	pseudonyms, err := newPseudonymizer(filepath.Join(directory, "mappings.json"))
+	if err != nil {
+		t.Fatalf("newPseudonymizer returned error: %v", err)
+	}
+	cfg := config{
+		Endpoint:       server.URL,
+		DumpTable:      "DeviceInfo",
+		DumpLookback:   "30d",
+		DumpTimeColumn: "Timestamp",
+		DumpRowLimit:   defaultDumpRowLimit,
+		Output:         filepath.Join(directory, "deviceinfo.json"),
+	}
+
+	if _, err := dumpTable(context.Background(), server.Client(), cfg, "token-value", pseudonyms, io.Discard); err != nil {
+		t.Fatalf("dumpTable returned error: %v", err)
+	}
+	body, err := os.ReadFile(cfg.Output)
+	if err != nil {
+		t.Fatalf("read output: %v", err)
+	}
+	for _, original := range []string{"alice@contoso.com", "CONTOSO-DC-01"} {
+		if strings.Contains(string(body), original) {
+			t.Fatalf("raw identifier %q reached disk: %s", original, body)
+		}
+	}
+	if pseudonyms.MappingCount() == 0 {
+		t.Fatalf("expected pseudonym mappings to be recorded")
+	}
+}
+
 func TestDumpTableWithHashPartitioning(t *testing.T) {
 	var mu sync.Mutex
 	seenChunkQueries := map[string]bool{}
+	activeChunks := 0
+	maxActiveChunks := 0
+	writePartition := func(w http.ResponseWriter, partition string) {
+		mu.Lock()
+		seenChunkQueries[partition] = true
+		activeChunks++
+		if activeChunks > maxActiveChunks {
+			maxActiveChunks = activeChunks
+		}
+		mu.Unlock()
+
+		time.Sleep(10 * time.Millisecond)
+		fmt.Fprintf(w, `{"Schema":[{"Name":"EventId","Type":"String"}],"Results":[{"EventId":"partition-%s"}]}`, partition)
+
+		mu.Lock()
+		activeChunks--
+		mu.Unlock()
+	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := readAdvancedQueryRequest(t, r)
@@ -100,20 +164,11 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 		case query == "DeviceEvents\n| where Timestamp >= ago(7d)\n| summarize Count=count() by DumpPartition=hash(tostring(pack_all()), 3)":
 			io.WriteString(w, `{"Schema":[{"Name":"DumpPartition","Type":"Int64"},{"Name":"Count","Type":"Int64"}],"Results":[{"DumpPartition":0,"Count":20000},{"DumpPartition":1,"Count":20001},{"DumpPartition":2,"Count":20000}]}`)
 		case strings.Contains(query, "| where hash(tostring(pack_all()), 3) == 0"):
-			mu.Lock()
-			seenChunkQueries["0"] = true
-			mu.Unlock()
-			io.WriteString(w, `{"Schema":[{"Name":"EventId","Type":"String"}],"Results":[{"EventId":"partition-0"}]}`)
+			writePartition(w, "0")
 		case strings.Contains(query, "| where hash(tostring(pack_all()), 3) == 1"):
-			mu.Lock()
-			seenChunkQueries["1"] = true
-			mu.Unlock()
-			io.WriteString(w, `{"Schema":[{"Name":"EventId","Type":"String"}],"Results":[{"EventId":"partition-1"}]}`)
+			writePartition(w, "1")
 		case strings.Contains(query, "| where hash(tostring(pack_all()), 3) == 2"):
-			mu.Lock()
-			seenChunkQueries["2"] = true
-			mu.Unlock()
-			io.WriteString(w, `{"Schema":[{"Name":"EventId","Type":"String"}],"Results":[{"EventId":"partition-2"}]}`)
+			writePartition(w, "2")
 		default:
 			t.Fatalf("unexpected query %q", query)
 		}
@@ -121,18 +176,17 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 	defer server.Close()
 
 	cfg := config{
-		Endpoint:        server.URL,
-		DumpTable:       "DeviceEvents",
-		DumpLookback:    "7d",
-		DumpTimeColumn:  "Timestamp",
-		DumpRowLimit:    defaultDumpRowLimit,
-		DumpParallelism: 2,
-		Output:          filepath.Join(t.TempDir(), "deviceevents.json"),
-		ADXExport:       true,
+		Endpoint:       server.URL,
+		DumpTable:      "DeviceEvents",
+		DumpLookback:   "7d",
+		DumpTimeColumn: "Timestamp",
+		DumpRowLimit:   defaultDumpRowLimit,
+		Output:         filepath.Join(t.TempDir(), "deviceevents.json"),
+		ADXExport:      true,
 	}
 
 	var progress bytes.Buffer
-	output, err := dumpTable(context.Background(), server.Client(), cfg, "token-value", &progress)
+	output, err := dumpTable(context.Background(), server.Client(), cfg, "token-value", nil, &progress)
 	if err != nil {
 		t.Fatalf("dumpTable returned error: %v", err)
 	}
@@ -146,6 +200,9 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 		if !seenChunkQueries[partition] {
 			t.Fatalf("partition %s was not queried", partition)
 		}
+	}
+	if maxActiveChunks != 1 {
+		t.Fatalf("expected sequential chunk requests, observed %d active requests", maxActiveChunks)
 	}
 	content, err := os.ReadFile(cfg.Output)
 	if err != nil {
@@ -191,7 +248,7 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 		"counting rows in DeviceEvents over 7d",
 		"found 60001 row(s) to dump",
 		"counting rows across 3 hash partition(s)",
-		"dumping 3 non-empty partition chunk(s)",
+		"dumping 3 non-empty partition chunk(s) sequentially",
 		"streaming results to",
 		"completed partition",
 		"completed partitioned dump with 3 row(s)",
