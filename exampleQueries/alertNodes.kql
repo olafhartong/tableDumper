@@ -1,0 +1,153 @@
+let base =
+    AlertInfo
+    | join kind=inner AlertEvidence on AlertId
+    | extend
+        safeUserLabel = case(
+            isnotempty(AccountUpn), AccountUpn,
+            isnotempty(AccountDomain) and isnotempty(AccountName), strcat(AccountDomain, "\\", AccountName),
+            isnotempty(AccountName), AccountName,
+            isnotempty(AccountSid), AccountSid,
+            isnotempty(AccountObjectId), AccountObjectId,
+            ""
+        ),
+        safeFileLabel = case(
+            isnotempty(FolderPath) and isnotempty(FileName), strcat(FolderPath, "\\", FileName),
+            isnotempty(FileName), FileName,
+            isnotempty(FolderPath), FolderPath,
+            isnotempty(SHA1), SHA1,
+            isnotempty(SHA256), SHA256,
+            ""
+        ),
+        safeProcessLabel = case(
+            isnotempty(FileName), FileName,
+            isnotempty(ProcessCommandLine), ProcessCommandLine,
+            isnotempty(SHA1), SHA1,
+            isnotempty(SHA256), SHA256,
+            ""
+        ),
+        entityValue = case(
+            EntityType == "Machine", coalesce(DeviceId, DeviceName, LocalIP),
+            EntityType == "User", coalesce(AccountObjectId, AccountSid, AccountUpn, AccountName),
+            EntityType == "File", coalesce(SHA1, SHA256, FileName, FolderPath),
+            EntityType == "Process", coalesce(SHA1, SHA256, ProcessCommandLine, FileName),
+            EntityType == "Ip", coalesce(RemoteIP, LocalIP),
+            EntityType == "Url", RemoteUrl,
+            EntityType == "CloudResource", coalesce(ResourceID, CloudResource),
+            EntityType == "MailMessage", coalesce(NetworkMessageId, EmailSubject),
+            EntityType == "Application", coalesce(OAuthApplicationId, tostring(ApplicationId), Application),
+            coalesce(
+                SHA1, SHA256, DeviceId, DeviceName, AccountObjectId, AccountSid,
+                AccountUpn, RemoteIP, LocalIP, RemoteUrl, ResourceID,
+                NetworkMessageId, ProcessCommandLine, FileName
+            )
+        )
+    | where isnotempty(entityValue)
+    | extend
+        entityId = tostring(entityValue),
+        entityType = tostring(EntityType),
+        entityLabel = case(
+            EntityType == "Machine", coalesce(DeviceName, DeviceId, LocalIP, entityValue),
+            EntityType == "User", iff(isempty(safeUserLabel) or safeUserLabel == "\\", entityValue, safeUserLabel),
+            EntityType == "File", iff(isempty(safeFileLabel) or safeFileLabel == "\\", entityValue, safeFileLabel),
+            EntityType == "Process", iff(isempty(safeProcessLabel) or safeProcessLabel == "\\", entityValue, safeProcessLabel),
+            EntityType == "Ip", coalesce(RemoteIP, LocalIP, entityValue),
+            EntityType == "Url", coalesce(RemoteUrl, entityValue),
+            EntityType == "CloudResource", coalesce(CloudResource, ResourceID, entityValue),
+            EntityType == "MailMessage", coalesce(EmailSubject, NetworkMessageId, entityValue),
+            EntityType == "Application", coalesce(Application, OAuthApplicationId, tostring(ApplicationId), entityValue),
+            entityValue
+        );
+union
+(
+    base
+    | summarize
+        label = any(coalesce(Title, Title1, AlertId)),
+        timestamp = min(TimeGenerated),
+        severity = any(Severity),
+        category = any(Category),
+        detectionSource = any(DetectionSource),
+        serviceSource = any(ServiceSource),
+        attackTechniques = any(AttackTechniques),
+        tenantId = any(TenantId)
+      by id = AlertId
+    | project
+        id,
+        type = "Alert",
+        label,
+        properties = pack(
+            "alertId", id,
+            "title", label,
+            "severity", severity,
+            "category", category,
+            "detectionSource", detectionSource,
+            "serviceSource", serviceSource,
+            "attackTechniques", attackTechniques
+        ),
+        timestamp
+),
+(
+    base
+    | summarize
+        label = any(entityLabel),
+        timestamp = min(TimeGenerated1),
+        entityType = any(entityType),
+        DeviceId = any(DeviceId),
+        DeviceName = any(DeviceName),
+        LocalIP = any(LocalIP),
+        RemoteIP = any(RemoteIP),
+        RemoteUrl = any(RemoteUrl),
+        AccountName = any(AccountName),
+        AccountDomain = any(AccountDomain),
+        AccountUpn = any(AccountUpn),
+        AccountSid = any(AccountSid),
+        AccountObjectId = any(AccountObjectId),
+        FileName = any(FileName),
+        FolderPath = any(FolderPath),
+        SHA1 = any(SHA1),
+        SHA256 = any(SHA256),
+        FileSize = any(FileSize),
+        ProcessCommandLine = any(ProcessCommandLine),
+        Application = any(Application),
+        ApplicationId = any(ApplicationId),
+        OAuthApplicationId = any(OAuthApplicationId),
+        CloudResource = any(CloudResource),
+        ResourceID = any(ResourceID),
+        NetworkMessageId = any(NetworkMessageId),
+        EmailSubject = any(EmailSubject),
+        ThreatFamily = any(ThreatFamily),
+        tenantId = any(TenantId)
+      by id = entityId
+    | project
+        id,
+        type = entityType,
+        label,
+        properties = pack(
+            "id", id,
+            "entityType", entityType,
+            "deviceId", DeviceId,
+            "deviceName", DeviceName,
+            "localIP", LocalIP,
+            "remoteIP", RemoteIP,
+            "remoteUrl", RemoteUrl,
+            "accountName", AccountName,
+            "accountDomain", AccountDomain,
+            "accountUpn", AccountUpn,
+            "accountSid", AccountSid,
+            "accountObjectId", AccountObjectId,
+            "fileName", FileName,
+            "folderPath", FolderPath,
+            "sha1", SHA1,
+            "sha256", SHA256,
+            "fileSize", FileSize,
+            "processCommandLine", ProcessCommandLine,
+            "application", Application,
+            "applicationId", ApplicationId,
+            "oauthApplicationId", OAuthApplicationId,
+            "cloudResource", CloudResource,
+            "resourceId", ResourceID,
+            "networkMessageId", NetworkMessageId,
+            "emailSubject", EmailSubject,
+            "threatFamily", ThreatFamily
+        ),
+        timestamp
+)

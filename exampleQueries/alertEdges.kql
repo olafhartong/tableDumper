@@ -1,0 +1,61 @@
+let base =
+    AlertInfo
+    | join kind=inner AlertEvidence on AlertId
+    | extend
+        entityValue = case(
+            EntityType == "Machine", coalesce(DeviceId, DeviceName, LocalIP),
+            EntityType == "User", coalesce(AccountObjectId, AccountSid, AccountUpn, AccountName),
+            EntityType == "File", coalesce(SHA1, SHA256, FileName, FolderPath),
+            EntityType == "Process", coalesce(SHA1, SHA256, ProcessCommandLine, FileName),
+            EntityType == "Ip", coalesce(RemoteIP, LocalIP),
+            EntityType == "Url", RemoteUrl,
+            EntityType == "CloudResource", coalesce(ResourceID, CloudResource),
+            EntityType == "MailMessage", coalesce(NetworkMessageId, EmailSubject),
+            EntityType == "Application", coalesce(OAuthApplicationId, tostring(ApplicationId), Application),
+            coalesce(
+                SHA1, SHA256, DeviceId, DeviceName, AccountObjectId, AccountSid,
+                AccountUpn, RemoteIP, LocalIP, RemoteUrl, ResourceID,
+                NetworkMessageId, ProcessCommandLine, FileName
+            )
+        )
+    | where isnotempty(entityValue)
+    | extend
+        sourceId = AlertId,
+        targetId = tostring(entityValue),
+        edgeType = strcat("Alert", tostring(EvidenceRole)),
+        edgeLabel = case(
+            EvidenceRole == "Impacted", "Impacted",
+            EvidenceRole == "Related", "Related",
+            EvidenceRole == "Source", "Source",
+            EvidenceRole == "Destination", "Destination",
+            tostring(EvidenceRole)
+        );
+base
+| summarize
+    timestamp = min(TimeGenerated1),
+    evidenceRole = any(EvidenceRole),
+    evidenceDirection = any(EvidenceDirection),
+    alertTitle = any(coalesce(Title, Title1)),
+    entityType = any(EntityType),
+    severity = any(Severity),
+    category = any(Category),
+    weight = count()
+  by sourceId, targetId, type = edgeType, edgeType, label = edgeLabel
+| project
+    id = strcat(sourceId, "_", tolower(edgeType), "_", targetId),
+    sourceId,
+    targetId,
+    type,
+    edgeType,
+    label,
+    weight,
+    properties = pack(
+        "relationship", edgeType,
+        "evidenceRole", evidenceRole,
+        "evidenceDirection", evidenceDirection,
+        "alertTitle", alertTitle,
+        "entityType", entityType,
+        "severity", severity,
+        "category", category
+    ),
+    timestamp

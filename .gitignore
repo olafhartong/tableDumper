@@ -1,0 +1,7 @@
+*.json
+tabledumper
+*.log
+.env
+data/*
+.DS_Store
+/*/.DS_Store
