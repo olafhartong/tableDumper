@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -453,11 +454,7 @@ func (p *pseudonymizer) pseudonymizeValue(ctx context.Context, field string, val
 				out[key] = replacement
 				continue
 			}
-			if !p.shouldPseudonymizeField(key) {
-				out[key] = child
-				continue
-			}
-			if text, ok := child.(string); ok {
+			if text, ok := child.(string); ok && p.shouldPseudonymizeField(key) {
 				if isFolderPathField(key) || isPathBearingFilename(key, text) {
 					out[key] = p.pseudonymizePath(key, text)
 					continue
@@ -651,14 +648,14 @@ func (p *pseudonymizer) pseudonymizeString(ctx context.Context, field, value str
 	if strings.TrimSpace(value) == "" {
 		return value, nil
 	}
-	if !p.shouldPseudonymizeField(field) {
-		return value, nil
-	}
-	if isFolderPathField(field) || isPathBearingFilename(field, value) {
-		return p.pseudonymizePath(field, value), nil
-	}
-	if entityKindForFieldValue(field, value) == entityFilename && !p.filenamesEnabled() {
-		return value, nil
+	selected := p.shouldPseudonymizeField(field)
+	if selected {
+		if isFolderPathField(field) || isPathBearingFilename(field, value) {
+			return p.pseudonymizePath(field, value), nil
+		}
+		if entityKindForFieldValue(field, value) == entityFilename && !p.filenamesEnabled() {
+			return value, nil
+		}
 	}
 
 	if decoded, ok := decodeJSONObject(value); ok {
@@ -670,7 +667,19 @@ func (p *pseudonymizer) pseudonymizeString(ctx context.Context, field, value str
 		if err != nil {
 			return "", fmt.Errorf("encode pseudonymized nested JSON: %w", err)
 		}
+		if !selected {
+			originalBody, err := json.Marshal(decoded)
+			if err != nil {
+				return "", fmt.Errorf("encode original nested JSON: %w", err)
+			}
+			if string(body) == string(originalBody) {
+				return value, nil
+			}
+		}
 		return string(body), nil
+	}
+	if !selected {
+		return value, nil
 	}
 	if converted, ok := p.pseudonymizeAzureResourceID(value); ok {
 		return converted, nil
@@ -733,8 +742,14 @@ func decodeJSONObject(value string) (any, bool) {
 	if len(trimmed) < 2 || (trimmed[0] != '{' && trimmed[0] != '[') {
 		return nil, false
 	}
+	decoder := json.NewDecoder(strings.NewReader(trimmed))
+	decoder.UseNumber()
 	var decoded any
-	if err := json.Unmarshal([]byte(trimmed), &decoded); err != nil {
+	if err := decoder.Decode(&decoded); err != nil {
+		return nil, false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
 		return nil, false
 	}
 	return decoded, true

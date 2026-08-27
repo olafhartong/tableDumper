@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -132,7 +133,7 @@ func TestPseudonymFieldPolicyRejectsAmbiguousPatterns(t *testing.T) {
 	}
 }
 
-func TestDefaultFieldScopeLeavesUnselectedDataUntouched(t *testing.T) {
+func TestDefaultFieldScopeTraversesNestedContainers(t *testing.T) {
 	pseudonyms, err := newPseudonymizer(filepath.Join(t.TempDir(), "mappings.json"))
 	if err != nil {
 		t.Fatalf("newPseudonymizer returned error: %v", err)
@@ -149,7 +150,7 @@ func TestDefaultFieldScopeLeavesUnselectedDataUntouched(t *testing.T) {
 		"Timestamp":                   "2026-07-24",
 		"OSVersion":                   "10.8831.19045.6466",
 		"ProcessCommandLine":          `tool.exe --pipe \.\pipe\contoso.com --user alice`,
-		"AdditionalFields":            `{"AccountName":"nested-alice","FileName":"nested-secret.txt"}`,
+		"AdditionalFields":            ` { "AccountName": "nested-alice", "FileName": "nested-secret.txt", "RemoteIP": "10.9.8.7", "ProcessCommandLine": "tool.exe --password nested-secret", "DeviceId": 9007199254740993 } `,
 		"RemoteIP":                    "10.2.3.4",
 		"DeviceId":                    "80110e3c-3ec4-4567-b06d-7d47a72562f5",
 	}}
@@ -158,10 +159,30 @@ func TestDefaultFieldScopeLeavesUnselectedDataUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PseudonymizeRows returned error: %v", err)
 	}
-	for _, field := range []string{"NamedPipeName", "UnixTimestamp", "Timestamp", "OSVersion", "AdditionalFields", "RemoteIP", "DeviceId"} {
+	for _, field := range []string{"NamedPipeName", "UnixTimestamp", "Timestamp", "OSVersion", "RemoteIP", "DeviceId"} {
 		if converted[0][field] != rows[0][field] {
 			t.Errorf("unselected %s changed from %q to %q", field, rows[0][field], converted[0][field])
 		}
+	}
+	nestedJSON := converted[0]["AdditionalFields"].(string)
+	var nested map[string]any
+	if err := json.Unmarshal([]byte(nestedJSON), &nested); err != nil {
+		t.Fatalf("decode pseudonymized AdditionalFields: %v", err)
+	}
+	if nested["AccountName"] == "nested-alice" {
+		t.Fatal("selected nested AccountName was not pseudonymized")
+	}
+	if nested["FileName"] == "nested-secret.txt" {
+		t.Fatal("selected nested FileName was not pseudonymized")
+	}
+	if nested["RemoteIP"] != "10.9.8.7" {
+		t.Fatalf("unselected nested RemoteIP changed to %q", nested["RemoteIP"])
+	}
+	if got, want := nested["ProcessCommandLine"], "tool.exe --password ***"; got != want {
+		t.Fatalf("nested ProcessCommandLine = %q, want %q", got, want)
+	}
+	if !strings.Contains(nestedJSON, `"DeviceId":9007199254740993`) {
+		t.Fatalf("nested DeviceId lost numeric precision: %s", nestedJSON)
 	}
 	if got, want := converted[0]["ProcessCommandLine"], `tool.exe --pipe \.\pipe\contoso.com --user ***`; got != want {
 		t.Errorf("ProcessCommandLine = %q, want credential-masked %q", got, want)
@@ -177,6 +198,65 @@ func TestDefaultFieldScopeLeavesUnselectedDataUntouched(t *testing.T) {
 	username := converted[0]["AccountName"].(string)
 	if got := converted[0]["InitiatingProcessFolderPath"].(string); !strings.Contains(got, `\Users\`+username+`\`) {
 		t.Errorf("folder path %q does not use account pseudonym %q", got, username)
+	}
+}
+
+func TestDefaultFieldScopeTraversesNestedMapsAndArrays(t *testing.T) {
+	pseudonyms, err := newPseudonymizer(filepath.Join(t.TempDir(), "mappings.json"))
+	if err != nil {
+		t.Fatalf("newPseudonymizer returned error: %v", err)
+	}
+	rows := []map[string]any{{
+		"id": "device-123",
+		"properties": map[string]any{
+			"DeviceName":         "CONTOSO-WS-42",
+			"RemoteIP":           "10.2.3.4",
+			"ProcessCommandLine": `tool.exe --client-secret secret-123`,
+			"related": []any{
+				map[string]any{"AccountUpn": "alice@example.com", "DeviceId": "device-456"},
+			},
+		},
+	}}
+
+	converted, err := pseudonyms.PseudonymizeRows(context.Background(), rows)
+	if err != nil {
+		t.Fatalf("PseudonymizeRows returned error: %v", err)
+	}
+	if got := converted[0]["id"]; got != "device-123" {
+		t.Fatalf("unselected graph id changed to %q", got)
+	}
+	properties := converted[0]["properties"].(map[string]any)
+	if properties["DeviceName"] == "CONTOSO-WS-42" {
+		t.Fatal("selected DeviceName under properties was not pseudonymized")
+	}
+	if got := properties["RemoteIP"]; got != "10.2.3.4" {
+		t.Fatalf("unselected RemoteIP under properties changed to %q", got)
+	}
+	if got, want := properties["ProcessCommandLine"], "tool.exe --client-secret ***"; got != want {
+		t.Fatalf("nested ProcessCommandLine = %q, want %q", got, want)
+	}
+	related := properties["related"].([]any)
+	identity := related[0].(map[string]any)
+	if identity["AccountUpn"] == "alice@example.com" {
+		t.Fatal("selected AccountUpn in nested array was not pseudonymized")
+	}
+	if got := identity["DeviceId"]; got != "device-456" {
+		t.Fatalf("unselected DeviceId in nested array changed to %q", got)
+	}
+}
+
+func TestUnselectedNestedJSONWithoutSelectedValuesKeepsOriginalFormatting(t *testing.T) {
+	pseudonyms, err := newPseudonymizer(filepath.Join(t.TempDir(), "mappings.json"))
+	if err != nil {
+		t.Fatalf("newPseudonymizer returned error: %v", err)
+	}
+	original := ` { "RemoteIP": "10.2.3.4", "DeviceId": "device-123" } `
+	converted, err := pseudonyms.PseudonymizeRows(context.Background(), []map[string]any{{"AdditionalFields": original}})
+	if err != nil {
+		t.Fatalf("PseudonymizeRows returned error: %v", err)
+	}
+	if got := converted[0]["AdditionalFields"]; got != original {
+		t.Fatalf("unchanged nested JSON formatting changed from %q to %q", original, got)
 	}
 }
 

@@ -26,7 +26,7 @@ The pipeline combines:
 - linked identity, email sender, and device field families
 - optional configured literal replacements
 
-Fields outside the active allowlist are copied unchanged. The built-in policies avoid generic text, named pipes, timestamps, versions, general command-line content, hashes, scope/type metadata, and unrelated IDs. Sensitive command-line values are the exception: credential masking described below is always applied when pseudonymization is enabled. Unknown tables and free-form queries use a conservative semantic fallback.
+Scalar fields outside the active allowlist are copied unchanged. Maps, arrays, and JSON objects stored in strings are still traversed so selected fields and sensitive command-line values inside them receive the same protection as top-level fields. When traversal finds nothing to change in an unselected JSON string, the original bytes and formatting are preserved. The built-in policies avoid generic text, named pipes, timestamps, versions, general command-line content, hashes, scope/type metadata, IP-address fields, SIDs, and unrelated IDs. Sensitive command-line values are the exception: credential masking described below is applied at every traversed object level when pseudonymization is enabled. Unknown tables and free-form queries use a conservative semantic fallback.
 
 Filenames are also unchanged by default, even when filename and path columns are selected by the table policy. Use `--pseudonymize-filenames` when those values need to be transformed.
 

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -110,6 +111,57 @@ func TestWriteOpenGraphArtifactForAlertNodes(t *testing.T) {
 	}
 	if got := iconPayload.CustomTypes["Machine"].Icon.Name; got != "desktop" {
 		t.Fatalf("unexpected machine icon %#v", got)
+	}
+}
+
+func TestBuildOpenGraphPayloadUsesPseudonymizedNestedProperties(t *testing.T) {
+	pseudonyms, err := newPseudonymizer(filepath.Join(t.TempDir(), "mappings.json"))
+	if err != nil {
+		t.Fatalf("newPseudonymizer returned error: %v", err)
+	}
+	response := queryResponse{
+		Schema: []queryColumn{
+			{Name: "id", Type: "String"},
+			{Name: "type", Type: "String"},
+			{Name: "label", Type: "String"},
+			{Name: "properties", Type: "Object"},
+		},
+		Results: []map[string]any{{
+			"id":    "device-123",
+			"type":  "Machine",
+			"label": "CONTOSO-WS-42",
+			"properties": map[string]any{
+				"AccountName":        "alice",
+				"DeviceName":         "CONTOSO-WS-42",
+				"RemoteIP":           "10.2.3.4",
+				"ProcessCommandLine": `tool.exe --client-secret secret-123`,
+			},
+		}},
+	}
+
+	converted, err := pseudonyms.PseudonymizeResponse(context.Background(), response)
+	if err != nil {
+		t.Fatalf("PseudonymizeResponse returned error: %v", err)
+	}
+	payload, err := buildOpenGraphPayload(converted)
+	if err != nil {
+		t.Fatalf("buildOpenGraphPayload returned error: %v", err)
+	}
+	if len(payload.Graph.Nodes) != 1 {
+		t.Fatalf("unexpected node count %d", len(payload.Graph.Nodes))
+	}
+	properties := payload.Graph.Nodes[0].Properties
+	if got := properties["accountname"]; got == "alice" {
+		t.Fatal("OpenGraph accountname contains the original nested identifier")
+	}
+	if got := properties["devicename"]; got == "CONTOSO-WS-42" {
+		t.Fatal("OpenGraph devicename contains the original nested identifier")
+	}
+	if got, want := properties["processcommandline"], "tool.exe --client-secret ***"; got != want {
+		t.Fatalf("OpenGraph processcommandline = %q, want %q", got, want)
+	}
+	if got, want := properties["remoteip"], "10.2.3.4"; got != want {
+		t.Fatalf("unselected OpenGraph remoteip = %q, want %q", got, want)
 	}
 }
 
