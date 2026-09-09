@@ -29,7 +29,7 @@ func TestPseudonymPoolsExpandPastFriendlyNameCapacity(t *testing.T) {
 			original := fmt.Sprintf("%s-%d", tc.prefix, i)
 			got := p.replacement(tc.kind, original)
 			if got == "" || seen[got] {
-				t.Fatalf("%s allocation %d failed or duplicated: %v", tc.kind, i, p.generationError)
+				t.Fatalf("%s allocation %d failed or duplicated: %v", tc.kind, i, p.transformationError)
 			}
 			seen[got] = true
 			if i%1000 == 0 {

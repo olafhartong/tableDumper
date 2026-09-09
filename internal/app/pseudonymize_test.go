@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -322,68 +323,54 @@ func TestPseudonymizeRowsLinksSecurityEventAccountFields(t *testing.T) {
 	}
 }
 
-func TestPseudonymizeRowsRepairsExistingInconsistentIdentityMappings(t *testing.T) {
+func TestPseudonymizeRowsRejectsInconsistentIdentityMappingsWithoutMutation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mappings.json")
-	pseudonyms, err := newPseudonymizer(path)
+	p, err := newPseudonymizer(path)
 	if err != nil {
-		t.Fatalf("newPseudonymizer returned error: %v", err)
+		t.Fatal(err)
 	}
-	policy, err := newPseudonymFieldPolicy(defaultPseudonymFieldsForTable("DeviceProcessEvents"))
+	configureAllPseudonymFields(t, p)
+	p.replacement(entityUsername, "legacy-logon")
+	p.replacement(entityDomain, "CONTOSO")
+	p.replacement(entityEmail, "alice.vanpelt@corp.contoso.com")
+	if err := p.Save(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("create DeviceProcessEvents policy: %v", err)
+		t.Fatal(err)
 	}
-	if err := pseudonyms.ConfigureFieldPolicy(policy); err != nil {
-		t.Fatalf("ConfigureFieldPolicy returned error: %v", err)
+	originals := make(map[string]pseudonymMapping)
+	for key, mapping := range p.mappings {
+		originals[key] = mapping
 	}
-
-	// Simulate a vault created by the old value-only implementation.
-	accountName := pseudonyms.replacement(entityUsername, "legacy-logon")
-	accountDomain := pseudonyms.replacement(entityDomain, "CONTOSO")
-	accountUPN := pseudonyms.replacement(entityEmail, "alice.vanpelt@corp.contoso.com")
-	local, domain, ok := splitEmail(accountUPN)
-	if !ok || (accountName == local && accountDomain == domain) {
-		t.Fatalf("test setup did not create inconsistent legacy mappings: %q, %q, %q", accountName, accountDomain, accountUPN)
-	}
-	if err := pseudonyms.Save(); err != nil {
-		t.Fatalf("save legacy mappings: %v", err)
-	}
-
-	rows := []map[string]any{{
-		"AccountDomain":                  "CONTOSO",
-		"AccountName":                    "legacy-logon",
-		"AccountUpn":                     "alice.vanpelt@corp.contoso.com",
-		"InitiatingProcessAccountDomain": "CONTOSO",
-		"InitiatingProcessAccountName":   "legacy-logon",
-		"InitiatingProcessAccountUpn":    "alice.vanpelt@corp.contoso.com",
-	}}
-	converted, err := pseudonyms.PseudonymizeRows(context.Background(), rows)
-	if err != nil {
-		t.Fatalf("PseudonymizeRows returned error: %v", err)
-	}
-	assertLinkedAccountFamily(t, converted[0], "")
-	assertLinkedAccountFamily(t, converted[0], "InitiatingProcess")
-	if converted[0]["AccountName"] != converted[0]["InitiatingProcessAccountName"] || converted[0]["AccountUpn"] != converted[0]["InitiatingProcessAccountUpn"] || converted[0]["AccountDomain"] != converted[0]["InitiatingProcessAccountDomain"] {
-		t.Fatalf("identical source identities did not resolve to one identity set: %#v", converted[0])
-	}
-
-	if err := pseudonyms.Save(); err != nil {
-		t.Fatalf("save repaired mappings: %v", err)
-	}
-	reloaded, err := newPseudonymizer(path)
-	if err != nil {
-		t.Fatalf("reload repaired mappings: %v", err)
-	}
-	if err := reloaded.ConfigureFieldPolicy(policy); err != nil {
-		t.Fatalf("ConfigureFieldPolicy after reload: %v", err)
-	}
-	again, err := reloaded.PseudonymizeRows(context.Background(), rows)
-	if err != nil {
-		t.Fatalf("PseudonymizeRows after reload returned error: %v", err)
-	}
-	firstBody, _ := json.Marshal(converted)
-	againBody, _ := json.Marshal(again)
-	if string(firstBody) != string(againBody) {
-		t.Fatalf("repaired identity changed after vault reload:\nfirst: %s\nagain: %s", firstBody, againBody)
+	rows := []map[string]any{{"AccountDomain": "CONTOSO", "AccountName": "legacy-logon", "AccountUpn": "alice.vanpelt@corp.contoso.com"}}
+	for round := 0; round < 2; round++ {
+		out, err := p.PseudonymizeRows(context.Background(), rows)
+		var conflict *pseudonymRelationshipError
+		if out != nil || !errors.As(err, &conflict) {
+			t.Fatalf("wanted relationship conflict, got %v, %v", out, err)
+		}
+		for key, want := range originals {
+			if p.mappings[key] != want {
+				t.Fatal("existing mapping changed")
+			}
+		}
+		if !errors.As(p.Save(), &conflict) {
+			t.Fatal("conflicted mappings must not be saved")
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(after) != string(before) {
+			t.Fatal("saved vault changed after conflict")
+		}
+		p, err = newPseudonymizer(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		configureAllPseudonymFields(t, p)
 	}
 }
 
@@ -557,7 +544,7 @@ func TestPseudonymizeRowsLinksDeviceHostAndDomainFields(t *testing.T) {
 	}
 }
 
-func TestPseudonymizeRowsLinksDeviceFQDNToPrimaryAccountDomain(t *testing.T) {
+func TestPseudonymizeRowsKeepsDeviceDomainIndependentOfAccountDomains(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mappings.json")
 	pseudonyms, err := newPseudonymizer(path)
 	if err != nil {
@@ -565,7 +552,7 @@ func TestPseudonymizeRowsLinksDeviceFQDNToPrimaryAccountDomain(t *testing.T) {
 	}
 	// Simulate independent legacy mappings for the account and device domains.
 	pseudonyms.replacement(entityDomain, "CONTOSO")
-	pseudonyms.replacement(entityHostname, "host-42.corp.contoso.com")
+	originalHost := pseudonyms.replacement(entityHostname, "host-42.corp.contoso.com")
 	if err := pseudonyms.Save(); err != nil {
 		t.Fatalf("Save returned error: %v", err)
 	}
@@ -584,8 +571,8 @@ func TestPseudonymizeRowsLinksDeviceFQDNToPrimaryAccountDomain(t *testing.T) {
 		t.Fatalf("PseudonymizeRows returned error: %v", err)
 	}
 	_, deviceDomain := splitHostname(converted[0]["DeviceName"].(string))
-	if deviceDomain == "" || converted[0]["AccountDomain"] != deviceDomain {
-		t.Fatalf("DeviceName domain does not match primary AccountDomain: %#v", converted[0])
+	if deviceDomain == "" || converted[0]["DeviceName"] != originalHost || converted[0]["AccountDomain"] == deviceDomain {
+		t.Fatalf("DeviceName changed its own established domain: %#v", converted[0])
 	}
 	if converted[0]["InitiatingProcessAccountDomain"] == deviceDomain {
 		t.Fatalf("DeviceName incorrectly used the secondary initiating-process domain: %#v", converted[0])

@@ -78,7 +78,7 @@ type pseudonymizer struct {
 	pseudonymizeFilenames bool
 	initialSize           int
 	discardedMappings     int
-	generationError       error
+	transformationError   error
 }
 
 // A restricted output format can have fewer values than the source data.
@@ -89,6 +89,12 @@ type pseudonymCapacityError struct {
 
 func (e *pseudonymCapacityError) Error() string {
 	return fmt.Sprintf("cannot allocate a unique %s pseudonym within the supported output space; collection stopped without publishing this result", e.Kind)
+}
+
+type pseudonymRelationshipError struct{ Kind entityKind }
+
+func (e *pseudonymRelationshipError) Error() string {
+	return fmt.Sprintf("conflicting %s pseudonym relationship; existing mappings were preserved and this result will not be published; use a separate new vault for a complete recollection if aliases must change", e.Kind)
 }
 
 type recognizedEntity struct {
@@ -379,8 +385,8 @@ func (p *pseudonymizer) Save() error {
 }
 
 func (p *pseudonymizer) saveLocked() error {
-	if p.generationError != nil {
-		return p.generationError
+	if p.transformationError != nil {
+		return p.transformationError
 	}
 	mappings := make([]pseudonymMapping, 0, len(p.mappings))
 	for _, mapping := range p.mappings {
@@ -466,10 +472,10 @@ func (p *pseudonymizer) PseudonymizeRows(ctx context.Context, rows []map[string]
 			return nil, err
 		}
 		p.mu.Lock()
-		generationError := p.generationError
+		transformationError := p.transformationError
 		p.mu.Unlock()
-		if generationError != nil {
-			return nil, generationError
+		if transformationError != nil {
+			return nil, transformationError
 		}
 		converted, ok := value.(map[string]any)
 		if !ok {
@@ -1237,7 +1243,7 @@ func (p *pseudonymizer) replacement(kind entityKind, original string) string {
 }
 
 func (p *pseudonymizer) replacementLocked(kind entityKind, original string) string {
-	if p.generationError != nil {
+	if p.transformationError != nil {
 		return ""
 	}
 	if strings.TrimSpace(original) == "" {
@@ -1252,7 +1258,7 @@ func (p *pseudonymizer) replacementLocked(kind entityKind, original string) stri
 	limit := pseudonymCandidateLimit(kind, original)
 	for attempt := 0; ; attempt++ {
 		if attempt == limit {
-			p.generationError = &pseudonymCapacityError{Kind: kind}
+			p.transformationError = &pseudonymCapacityError{Kind: kind}
 			return ""
 		}
 		switch kind {
@@ -1287,7 +1293,7 @@ func (p *pseudonymizer) replacementLocked(kind entityKind, original string) stri
 		default:
 			candidate = p.generateCandidate(kind, original, attempt)
 		}
-		if p.generationError != nil {
+		if p.transformationError != nil {
 			return ""
 		}
 		if owner, exists := p.used[strings.ToLower(candidate)]; !exists || owner == key {
@@ -1319,7 +1325,7 @@ func splitSubdomain(domain string) (string, string, bool) {
 }
 
 func (p *pseudonymizer) forceReplacementLocked(kind entityKind, original, candidate string) string {
-	if p.generationError != nil {
+	if p.transformationError != nil {
 		return ""
 	}
 	key := entityKey(kind, original)
@@ -1329,7 +1335,7 @@ func (p *pseudonymizer) forceReplacementLocked(kind entityKind, original, candid
 	base := candidate
 	for suffix := 2; ; suffix++ {
 		if suffix > 258 {
-			p.generationError = &pseudonymCapacityError{Kind: kind}
+			p.transformationError = &pseudonymCapacityError{Kind: kind}
 			return ""
 		}
 		if owner, exists := p.used[strings.ToLower(candidate)]; !exists || owner == key {

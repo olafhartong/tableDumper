@@ -46,19 +46,8 @@ type linkedDeviceProfile struct {
 
 func (p *pseudonymizer) primeEntityRelationships(row map[string]any) map[string]string {
 	overrides := p.primeLinkedIdentities(row)
-	p.primeLinkedDevices(row, preferredDeviceDomain(row, overrides))
+	p.primeLinkedDevices(row)
 	return overrides
-}
-
-func preferredDeviceDomain(row map[string]any, identityOverrides map[string]string) string {
-	for _, wanted := range []string{"accountdomain", "initiatingprocessaccountdomain"} {
-		for _, field := range sortedMapKeys(row) {
-			if normalizeFieldName(field) == wanted {
-				return strings.TrimSpace(identityOverrides[field])
-			}
-		}
-	}
-	return ""
 }
 
 func (p *pseudonymizer) primeLinkedIdentities(row map[string]any) map[string]string {
@@ -322,7 +311,7 @@ func linkedIdentityField(field string) (string, entityKind, bool) {
 	return "", "", false
 }
 
-func (p *pseudonymizer) primeLinkedDevices(row map[string]any, preferredDomain string) {
+func (p *pseudonymizer) primeLinkedDevices(row map[string]any) {
 	profiles := make(map[string]*linkedDeviceProfile)
 	for _, field := range sortedMapKeys(row) {
 		if !p.shouldPseudonymizeField(field) {
@@ -360,11 +349,11 @@ func (p *pseudonymizer) primeLinkedDevices(row map[string]any, preferredDomain s
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, group := range groups {
-		p.linkDeviceProfileLocked(profiles[group], preferredDomain)
+		p.linkDeviceProfileLocked(profiles[group])
 	}
 }
 
-func (p *pseudonymizer) linkDeviceProfileLocked(profile *linkedDeviceProfile, preferredDomain string) {
+func (p *pseudonymizer) linkDeviceProfileLocked(profile *linkedDeviceProfile) {
 	if len(profile.hosts) == 0 {
 		return
 	}
@@ -383,7 +372,7 @@ func (p *pseudonymizer) linkDeviceProfileLocked(profile *linkedDeviceProfile, pr
 	if fakeHost == "" {
 		fakeHost = p.replacementLocked(entityHostname, profile.hosts[0].host)
 	}
-	fakeDomain := strings.TrimSpace(preferredDomain)
+	fakeDomain := ""
 	if fakeDomain == "" {
 		for _, domain := range profile.domains {
 			if mapping, ok := p.mappings[entityKey(entityDomain, domain)]; ok {
@@ -442,6 +431,9 @@ func linkedDeviceField(field string) (string, entityKind, entityKind, bool) {
 }
 
 func (p *pseudonymizer) forceLinkedReplacementLocked(kind entityKind, original, candidate string) string {
+	if p.transformationError != nil {
+		return ""
+	}
 	if strings.TrimSpace(original) == "" || strings.TrimSpace(candidate) == "" {
 		return original
 	}
@@ -449,7 +441,10 @@ func (p *pseudonymizer) forceLinkedReplacementLocked(kind entityKind, original, 
 	if mapping, ok := p.mappings[key]; ok && mapping.Pseudonym == candidate {
 		return candidate
 	} else if ok {
-		p.releaseUsedPseudonymLocked(key, mapping.Pseudonym)
+		// An emitted or saved mapping is immutable. A contradictory later
+		// relationship requires an explicit migration, never a silent rewrite.
+		p.transformationError = &pseudonymRelationshipError{Kind: kind}
+		return mapping.Pseudonym
 	}
 	mapping := pseudonymMapping{EntityType: string(kind), Original: original, Pseudonym: candidate}
 	if owner, exists := p.used[strings.ToLower(candidate)]; exists && owner != key {
@@ -466,20 +461,6 @@ func (p *pseudonymizer) forceLinkedReplacementLocked(kind entityKind, original, 
 		p.used[strings.ToLower(candidate)] = key
 	}
 	return candidate
-}
-
-func (p *pseudonymizer) releaseUsedPseudonymLocked(key, pseudonym string) {
-	usedKey := strings.ToLower(pseudonym)
-	if p.used[usedKey] != key {
-		return
-	}
-	delete(p.used, usedKey)
-	for otherKey, mapping := range p.mappings {
-		if otherKey != key && strings.EqualFold(mapping.Pseudonym, pseudonym) {
-			p.used[usedKey] = otherKey
-			return
-		}
-	}
 }
 
 func linkedAliasesMaySharePseudonym(kind entityKind, originalKey string) bool {
