@@ -126,6 +126,12 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&envFile, "env-file", envFile, "Path to a dotenv file to read for default credential values")
 	fs.DurationVar(&cfg.Timeout, "timeout", 60*time.Second, "HTTP timeout")
 
+	// Help (including usage after a parse error) must not reveal credentials
+	// loaded from the environment or dotenv. Keep the actual flag values intact.
+	for _, name := range []string{"client-secret", "adx-client-secret", "bloodhound-token", "bloodhound-token-key"} {
+		fs.Lookup(name).DefValue = ""
+	}
+
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "Usage: %s --query \"DeviceInfo | limit 10\" --output results.json [flags]\n\n", fs.Name())
 		fmt.Fprintln(stderr, "Run a Defender for Endpoint advanced hunting query and save the JSON response.")

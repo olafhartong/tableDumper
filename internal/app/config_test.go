@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"os"
@@ -9,6 +10,52 @@ import (
 	"testing"
 	"time"
 )
+
+func TestUsageNeverPrintsSecretDefaults(t *testing.T) {
+	keys := []string{"AZURE_CLIENT_SECRET", "ADX_CLIENT_SECRET", "BLOODHOUND_TOKEN", "BLOODHOUND_TOKEN_KEY"}
+	for _, source := range []string{"environment", "dotenv"} {
+		t.Run(source, func(t *testing.T) {
+			var dotenv strings.Builder
+			for _, key := range keys {
+				secret := "synthetic-secret-" + key
+				t.Setenv(key, "")
+				if source == "environment" {
+					t.Setenv(key, secret)
+				} else {
+					dotenv.WriteString(key + "=" + secret + "\n")
+				}
+			}
+			path := filepath.Join(t.TempDir(), "credentials.env")
+			if err := os.WriteFile(path, []byte(dotenv.String()), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, flag := range []string{"--help", "--unknown-flag"} {
+				var output bytes.Buffer
+				_, err := parseFlags([]string{"--env-file", path, flag}, &output)
+				if err == nil || !strings.Contains(output.String(), "Flags:") {
+					t.Fatalf("expected usage, got error %v and output %s", err, &output)
+				}
+				if strings.Contains(output.String(), "synthetic-secret-") {
+					t.Fatal("usage exposed a secret")
+				}
+			}
+			cfg, err := parseFlags([]string{"--env-file", path}, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			values := []string{cfg.ClientSecret, cfg.ADXClientSecret, cfg.BloodHoundToken, cfg.BloodHoundTokenKey}
+			for i, value := range values {
+				if value != "synthetic-secret-"+keys[i] {
+					t.Fatalf("secret default no longer resolves for %s", keys[i])
+				}
+			}
+			cfg, err = parseFlags([]string{"--env-file", path, "--client-secret=explicit"}, io.Discard)
+			if err != nil || cfg.ClientSecret != "explicit" {
+				t.Fatal("explicit flag must take precedence over secret defaults")
+			}
+		})
+	}
+}
 
 func TestLoadDotEnv(t *testing.T) {
 	t.Run("missing default env file is ignored", func(t *testing.T) {
