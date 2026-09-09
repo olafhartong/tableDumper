@@ -67,7 +67,10 @@ func (p *pseudonymizer) linkedFilenameOverrides(row map[string]any) map[string]s
 			}
 		}
 		for _, entry := range profile.commandLine {
-			if converted, changed := replaceRelatedCommandFilename(entry.value, original, replacement); changed {
+			// Mask while the original executable is available for command-specific
+			// options such as mysql -pPASSWORD, then link executable references.
+			masked := maskSensitiveCommandLine(entry.value, row)
+			if converted, changed := replaceRelatedCommandFilename(masked, original, replacement); changed || masked != entry.value {
 				overrides[entry.field] = converted
 			}
 		}

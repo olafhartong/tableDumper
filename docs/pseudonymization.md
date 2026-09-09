@@ -65,7 +65,7 @@ The masker covers:
 - URL user information, email/UPN values, recognizable JWTs, and AWS access-key IDs
 - account values known from the same event and usernames inside common user-home paths
 
-Separated, `=`, `:`, quoted, and common connection-string forms retain their original syntax while only the value becomes `***`. Arbitrary unlabeled secret strings cannot be distinguished reliably from ordinary arguments, so secrets should still be supplied through clearly named options or environment variables whenever possible.
+Separated, `=`, `:`, quoted, and common connection-string forms retain their original syntax while only the value becomes `***`. Value scanning handles backslash and PowerShell backtick escapes, doubled quotes, adjacent quoted/unquoted fragments, and escaped JSON strings. Attached MySQL-family `-pPASSWORD`/`-uUSER` and curl `-uUSER:PASSWORD`/`-UPROXY:PASSWORD` options are masked while the original executable is still available, including with filename pseudonymization enabled. Attached short options are recognized for those commands rather than interpreting unrelated options such as `-port` or `-path` as credentials. Malformed unterminated credential values are masked through the remaining command text. This is a credential redactor, not a complete interpreter for every shell or application grammar. Arbitrary unlabeled secret strings cannot be distinguished reliably from ordinary arguments, so secrets should still be supplied through clearly named options or environment variables whenever possible.
 
 ## `--pseudonym-map`
 

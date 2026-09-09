@@ -6,8 +6,6 @@ import (
 	"strings"
 )
 
-const sensitiveCommandValuePattern = `("[^"]*"|'[^']*'|[^\s;&|"']+)`
-
 var (
 	sensitiveCommandKeyPattern = strings.Join([]string{
 		`user`, `username`, `user[-_]?name`, `user[-_]?id`, `uid`, `login`, `login[-_]?name`,
@@ -25,28 +23,27 @@ var (
 	}, `|`)
 
 	sensitiveSeparatedArgumentPattern = regexp.MustCompile(
-		`(?i)(?:^|[\s])(?:--?|/)(?:` + sensitiveCommandKeyPattern + `)[\t ]+` + sensitiveCommandValuePattern,
+		`(?i)(?:^|[\s])(?:--?|/)(?:` + sensitiveCommandKeyPattern + `)[\t ]+`,
 	)
-	sensitiveShortArgumentPattern = regexp.MustCompile(
-		`(?i)(?:^|[\s])-(?:u|p)[\t ]+` + sensitiveCommandValuePattern,
-	)
-	sensitiveShortAssignedArgumentPattern = regexp.MustCompile(
-		`(?i)(?:^|[\s])-(?:u|p)[\t ]*[:=][\t ]*` + sensitiveCommandValuePattern,
-	)
-	sensitiveAssignedArgumentPattern = regexp.MustCompile(
-		`(?i)(?:^|[\s;&|?])(?:(?:--?|/)?(?:` + sensitiveCommandKeyPattern + `))[\t ]*[:=][\t ]*` + sensitiveCommandValuePattern,
+	sensitiveShortArgumentPattern         = regexp.MustCompile(`(?i)(?:^|[\s])-(?:u|p)[\t ]+`)
+	sensitiveShortAssignedArgumentPattern = regexp.MustCompile(`(?i)(?:^|[\s])-(?:u|p)[\t ]*[:=][\t ]*`)
+	sensitiveAssignedArgumentPattern      = regexp.MustCompile(
+		`(?i)(?:^|[\s;&|?"'])(?:(?:--?|/)?(?:` + sensitiveCommandKeyPattern + `))[\t ]*[:=][\t ]*`,
 	)
 	sensitiveConnectionStringPattern = regexp.MustCompile(
-		`(?i)(?:^|[;\s])(?:user[\t ]*id|username|uid|password|pwd|client[\t ]*id|client[\t ]*secret|app[\t ]*id|app[\t ]*secret|account[\t ]*key|shared[\t ]*access[\t ]*(?:key|signature))[\t ]*=[\t ]*` + sensitiveCommandValuePattern,
+		`(?i)(?:^|[;\s"'])(?:user[\t ]*id|username|uid|password|pwd|client[\t ]*id|client[\t ]*secret|app[\t ]*id|app[\t ]*secret|account[\t ]*key|shared[\t ]*access[\t ]*(?:key|signature))[\t ]*=[\t ]*`,
 	)
 	sensitiveJSONPropertyPattern = regexp.MustCompile(
-		`(?i)(?:\\?["'])(?:` + sensitiveCommandKeyPattern + `)(?:\\?["'])[\t ]*:[\t ]*(\\?"[^"]*\\?"|\\?'[^']*\\?')`,
+		`(?i)(?:\\?["'])(?:` + sensitiveCommandKeyPattern + `)(?:\\?["'])[\t ]*:[\t ]*`,
 	)
-	sensitiveAuthorizationPattern = regexp.MustCompile(`(?i)(?:authorization[\t ]*[:=][\t ]*(?:\\?["'])?(?:bearer|basic)[\t ]+)([^"'\s;,]+)`)
-	sensitiveAPIHeaderPattern     = regexp.MustCompile(`(?i)(?:x-api-key|api-key|subscription-key)[\t ]*:[\t ]*([^"'\s;,]+)`)
-	urlUserInfoPattern            = regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://([^/@\s]+)@`)
-	jwtPattern                    = regexp.MustCompile(`\b(eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,})\b`)
-	awsAccessKeyPattern           = regexp.MustCompile(`\b((?:AKIA|ASIA)[A-Z0-9]{16})\b`)
+	sensitiveAttachedArgumentPattern = regexp.MustCompile(`(?:^|[\s])-[upU]`)
+	mysqlCommandPattern              = regexp.MustCompile(`(?i)(?:^|[\s"'/\\])(?:mysql|mysqldump|mysqlsh|mariadb|mariadb-dump)(?:\.exe)?(?:[\s"']|$)`)
+	curlCommandPattern               = regexp.MustCompile(`(?i)(?:^|[\s"'/\\])curl(?:\.exe)?(?:[\s"']|$)`)
+	sensitiveAuthorizationPattern    = regexp.MustCompile(`(?i)(?:authorization[\t ]*[:=][\t ]*(?:\\?["'])?(?:bearer|basic)[\t ]+)`)
+	sensitiveAPIHeaderPattern        = regexp.MustCompile(`(?i)(?:x-api-key|api-key|subscription-key)[\t ]*:[\t ]*`)
+	urlUserInfoPattern               = regexp.MustCompile(`(?i)[a-z][a-z0-9+.-]*://([^/@\s]+)@`)
+	jwtPattern                       = regexp.MustCompile(`\b(eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,})\b`)
+	awsAccessKeyPattern              = regexp.MustCompile(`\b((?:AKIA|ASIA)[A-Z0-9]{16})\b`)
 )
 
 func sensitiveCommandLineOverrides(row map[string]any, existing map[string]string) map[string]string {
@@ -71,15 +68,8 @@ func sensitiveCommandLineOverrides(row map[string]any, existing map[string]strin
 }
 
 func maskSensitiveCommandLine(value string, row map[string]any) string {
+	value = maskCommandArgumentValues(value)
 	for _, pattern := range []*regexp.Regexp{
-		sensitiveSeparatedArgumentPattern,
-		sensitiveShortArgumentPattern,
-		sensitiveShortAssignedArgumentPattern,
-		sensitiveAssignedArgumentPattern,
-		sensitiveConnectionStringPattern,
-		sensitiveJSONPropertyPattern,
-		sensitiveAuthorizationPattern,
-		sensitiveAPIHeaderPattern,
 		urlUserInfoPattern,
 		jwtPattern,
 		awsAccessKeyPattern,
@@ -95,6 +85,142 @@ func maskSensitiveCommandLine(value string, row map[string]any) string {
 func replaceCapturedCommandValues(value string, pattern *regexp.Regexp) string {
 	return replaceRegexCaptureFunc(value, pattern, 1, maskedCommandValue)
 }
+
+// Prefix detection identifies credentials; a scanner consumes their entire
+// value, including escaped quotes and adjacent quoted/unquoted token fragments.
+// All spans refer to the original command, avoiding offsets into edited text.
+func maskCommandArgumentValues(value string) string {
+	type span struct{ start, end int }
+	var spans []span
+	for _, pattern := range []*regexp.Regexp{
+		sensitiveSeparatedArgumentPattern, sensitiveShortArgumentPattern,
+		sensitiveShortAssignedArgumentPattern, sensitiveAssignedArgumentPattern,
+		sensitiveConnectionStringPattern, sensitiveJSONPropertyPattern,
+		sensitiveAuthorizationPattern, sensitiveAPIHeaderPattern,
+	} {
+		for _, match := range pattern.FindAllStringIndex(value, -1) {
+			start := match[1]
+			end := commandSecretEnd(value, start, pattern == sensitiveJSONPropertyPattern)
+			if end > start {
+				spans = append(spans, span{start, end})
+			}
+		}
+	}
+	// Attached short options are command-specific: for example MySQL's -P is
+	// a port and unrelated programs may use -path or -port as ordinary options.
+	mysql, curl := mysqlCommandPattern.MatchString(value), curlCommandPattern.MatchString(value)
+	for _, match := range sensitiveAttachedArgumentPattern.FindAllStringIndex(value, -1) {
+		start := match[1]
+		option := value[start-1]
+		if !(mysql && (option == 'u' || option == 'p') || curl && (option == 'u' || option == 'U')) || start == len(value) || strings.ContainsRune(" \t\r\n:=", rune(value[start])) {
+			continue
+		}
+		end := commandSecretEnd(value, start, false)
+		if end > start {
+			spans = append(spans, span{start, end})
+		}
+	}
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].start == spans[j].start {
+			return spans[i].end > spans[j].end
+		}
+		return spans[i].start < spans[j].start
+	})
+	var merged []span
+	for _, s := range spans {
+		if len(merged) > 0 && s.start < merged[len(merged)-1].end {
+			if s.end > merged[len(merged)-1].end {
+				merged[len(merged)-1].end = s.end
+			}
+		} else {
+			merged = append(merged, s)
+		}
+	}
+	var out strings.Builder
+	last := 0
+	for _, s := range merged {
+		out.WriteString(value[last:s.start])
+		out.WriteString(maskedCommandValue(value[s.start:s.end]))
+		last = s.end
+	}
+	out.WriteString(value[last:])
+	return out.String()
+}
+
+func commandSecretEnd(value string, start int, jsonProperty bool) int {
+	if jsonProperty && start+1 < len(value) && value[start] == '\\' && isCommandQuote(value[start+1]) {
+		// Escaped JSON delimiters use one backslash. An internal escaped quote
+		// has more backslashes and must not end the value.
+		quote := value[start+1]
+		for i := start + 2; i < len(value); i++ {
+			if value[i] != '\\' {
+				continue
+			}
+			j := i
+			for j < len(value) && value[j] == '\\' {
+				j++
+			}
+			if j < len(value) && value[j] == quote && j-i == 1 {
+				return j + 1
+			}
+			i = j
+		}
+		return len(value)
+	}
+	outer := commandQuoteContext(value[:start])
+	var quote byte
+	for i := start; i < len(value); i++ {
+		ch := value[i]
+		if (ch == '\\' || ch == '`') && i+1 < len(value) {
+			i++
+			continue
+		}
+		if quote != 0 {
+			if ch == quote {
+				if i+1 < len(value) && value[i+1] == quote {
+					i++
+					continue
+				}
+				quote = 0
+				if jsonProperty {
+					return i + 1
+				}
+			}
+			continue
+		}
+		if strings.ContainsRune(" \t\r\n;&|", rune(ch)) || jsonProperty && strings.ContainsRune(",}", rune(ch)) {
+			return i
+		}
+		if isCommandQuote(ch) {
+			if outer == ch {
+				return i
+			}
+			quote = ch
+		}
+	}
+	return len(value)
+}
+
+func commandQuoteContext(prefix string) byte {
+	var quote byte
+	for i := 0; i < len(prefix); i++ {
+		ch := prefix[i]
+		if (ch == '\\' || ch == '`') && i+1 < len(prefix) {
+			i++
+			continue
+		}
+		if quote != 0 {
+			if ch == quote {
+				quote = 0
+			}
+		} else if isCommandQuote(ch) {
+			quote = ch
+		}
+	}
+	return quote
+}
+
+func isCommandQuote(ch byte) bool { return ch == '"' || ch == '\'' }
 
 func maskedCommandValue(value string) string {
 	if len(value) >= 4 && value[0] == '\\' && (value[1] == '"' || value[1] == '\'') && value[len(value)-2] == '\\' && value[len(value)-1] == value[1] {
