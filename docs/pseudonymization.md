@@ -199,3 +199,7 @@ Azure Resource IDs retain their path hierarchy. The subscription ID, resource gr
 File paths preserve separators and directory structure. Usernames following `/Users/`, `/home/`, or `C:\Users\` are replaced consistently. Final filenames are preserved unless `--pseudonymize-filenames` is enabled; when enabled, the extension and the relationship with corresponding filename and command-line fields are retained.
 
 Domain-bearing URL fields replace the domain without changing unrelated path GUIDs, software versions, or query-string data. A host/domain field whose entire value is an IP address is left unchanged by the built-in policy.
+
+### Linked device aliases in the vault
+
+New linked mappings record an optional `alias_of` reference when a device name and a domain-typed FQDN share a pseudonym. Loading validates the reference after reading all entries, so file order does not matter. Exact matching hostname/FQDN aliases from older vaults remain readable. Unrelated cross-type collisions, dangling references, cycles, and references to a different pseudonym are rejected. The alias metadata is part of the private mapping vault and contains original identifiers, just like its mapping entries.

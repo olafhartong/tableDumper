@@ -451,7 +451,17 @@ func (p *pseudonymizer) forceLinkedReplacementLocked(kind entityKind, original, 
 	} else if ok {
 		p.releaseUsedPseudonymLocked(key, mapping.Pseudonym)
 	}
-	p.mappings[key] = pseudonymMapping{EntityType: string(kind), Original: original, Pseudonym: candidate}
+	mapping := pseudonymMapping{EntityType: string(kind), Original: original, Pseudonym: candidate}
+	if owner, exists := p.used[strings.ToLower(candidate)]; exists && owner != key {
+		target := p.mappings[owner]
+		if compatibleLinkedKinds(kind, entityKind(target.EntityType)) {
+			mapping.AliasOf = owner
+			if target.AliasOf != "" {
+				mapping.AliasOf = target.AliasOf
+			}
+		}
+	}
+	p.mappings[key] = mapping
 	if _, exists := p.used[strings.ToLower(candidate)]; !exists {
 		p.used[strings.ToLower(candidate)] = key
 	}
@@ -483,6 +493,30 @@ func linkedAliasesMaySharePseudonym(kind entityKind, originalKey string) bool {
 	default:
 		return false
 	}
+}
+
+func compatibleLinkedKinds(a, b entityKind) bool {
+	return a == b || (a == entityHostname && b == entityDomain) || (a == entityDomain && b == entityHostname)
+}
+
+func linkedMappingsMaySharePseudonym(key string, mapping pseudonymMapping, otherKey string, other pseudonymMapping) bool {
+	if !compatibleLinkedKinds(entityKind(mapping.EntityType), entityKind(other.EntityType)) {
+		return false
+	}
+	root, otherRoot := key, otherKey
+	if mapping.AliasOf != "" {
+		root = mapping.AliasOf
+	}
+	if other.AliasOf != "" {
+		otherRoot = other.AliasOf
+	}
+	if root == otherRoot {
+		return true
+	}
+	// Legacy vaults did not record aliases. The exact same FQDN appearing as
+	// both a device name and a domain-typed FQDN is an unambiguous old alias.
+	_, domain := splitHostname(mapping.Original)
+	return domain != "" && strings.EqualFold(strings.TrimSpace(mapping.Original), strings.TrimSpace(other.Original))
 }
 
 func sortedMapKeys(row map[string]any) []string {

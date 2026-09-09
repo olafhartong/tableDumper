@@ -54,6 +54,7 @@ type pseudonymMapping struct {
 	EntityType string `json:"entity_type"`
 	Original   string `json:"original"`
 	Pseudonym  string `json:"pseudonym"`
+	AliasOf    string `json:"alias_of,omitempty"`
 }
 
 type pseudonymVault struct {
@@ -282,10 +283,22 @@ func (p *pseudonymizer) loadOrCreate() error {
 		if existing, ok := p.mappings[key]; ok && existing.Pseudonym != mapping.Pseudonym {
 			return fmt.Errorf("conflicting pseudonym mapping entry %d in %s for %s value %q: %q and %q", index+1, p.path, mapping.EntityType, mapping.Original, existing.Pseudonym, mapping.Pseudonym)
 		}
-		if originalKey, ok := p.used[strings.ToLower(mapping.Pseudonym)]; kind != entityConfigured && ok && originalKey != key && !strings.HasPrefix(originalKey, string(entityConfigured)+"\x00") && !linkedAliasesMaySharePseudonym(kind, originalKey) {
-			return fmt.Errorf("conflicting pseudonym mapping entry %d in %s: %s value %q reuses pseudonym %q", index+1, p.path, mapping.EntityType, mapping.Original, mapping.Pseudonym)
-		}
 		p.mappings[key] = mapping
+	}
+	// Resolve aliases only after all entries are available: save order must not
+	// determine whether a valid cross-kind device alias can be loaded.
+	for _, key := range sortedMappingKeys(p.mappings) {
+		mapping := p.mappings[key]
+		kind := entityKind(mapping.EntityType)
+		if mapping.AliasOf != "" {
+			target, ok := p.mappings[mapping.AliasOf]
+			if !ok || mapping.AliasOf == key || target.AliasOf != "" || target.Pseudonym != mapping.Pseudonym || !compatibleLinkedKinds(kind, entityKind(target.EntityType)) {
+				return fmt.Errorf("invalid pseudonym alias in %s for entity type %s", p.path, kind)
+			}
+		}
+		if originalKey, ok := p.used[strings.ToLower(mapping.Pseudonym)]; kind != entityConfigured && ok && originalKey != key && !strings.HasPrefix(originalKey, string(entityConfigured)+"\x00") && !linkedAliasesMaySharePseudonym(kind, originalKey) && !linkedMappingsMaySharePseudonym(key, mapping, originalKey, p.mappings[originalKey]) {
+			return fmt.Errorf("conflicting pseudonym mapping in %s: entity type %s reuses an unrelated pseudonym", p.path, mapping.EntityType)
+		}
 		if _, exists := p.used[strings.ToLower(mapping.Pseudonym)]; !exists {
 			p.used[strings.ToLower(mapping.Pseudonym)] = key
 		}
@@ -298,6 +311,15 @@ func (p *pseudonymizer) loadOrCreate() error {
 		return nil
 	}
 	return os.Chmod(p.path, 0o600)
+}
+
+func sortedMappingKeys(mappings map[string]pseudonymMapping) []string {
+	keys := make([]string, 0, len(mappings))
+	for key := range mappings {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func validEntityKind(kind entityKind) bool {
