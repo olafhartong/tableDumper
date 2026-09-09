@@ -59,10 +59,10 @@ func (p *pseudonymizer) linkedFilenameOverrides(row map[string]any) map[string]s
 		}
 		replacement := p.replacement(entityFilename, original)
 		for _, entry := range profile.filenames {
-			overrides[entry.field] = replaceRelatedPathFilename(entry.value, original, replacement, true)
+			overrides[entry.field], _ = p.pseudonymizeLinkedPathFilename(entry.field, entry.value, original, replacement, true)
 		}
 		for _, entry := range profile.paths {
-			if converted, changed := replaceRelatedPathFilenameIfPresent(entry.value, original, replacement); changed {
+			if converted, changed := p.pseudonymizeLinkedPathFilename(entry.field, entry.value, original, replacement, false); changed {
 				overrides[entry.field] = converted
 			}
 		}
@@ -119,29 +119,26 @@ func pathLastComponentRange(value string) (bool, int, int) {
 	return start > 0, start, end
 }
 
-func replaceRelatedPathFilename(value, original, replacement string, replacePlain bool) string {
-	converted, changed := replaceRelatedPathFilenameIfPresent(value, original, replacement)
-	if changed {
-		return converted
-	}
-	if replacePlain && !strings.ContainsAny(value, `/\`) {
-		return replacement
-	}
-	return value
-}
-
-func replaceRelatedPathFilenameIfPresent(value, original, replacement string) (string, bool) {
+// Plan the linked basename and the other path edits against the same original
+// string, so no override skips path redaction or reprocesses a generated token.
+func (p *pseudonymizer) pseudonymizeLinkedPathFilename(field, value, original, replacement string, replacePlain bool) (string, bool) {
 	_, start, end := pathLastComponentRange(value)
-	if start == end {
-		return value, false
-	}
 	component := value[start:end]
+	linked := ""
 	for _, variant := range filenameReplacementVariants(original, replacement) {
 		if strings.EqualFold(component, variant.original) {
-			return value[:start] + variant.replacement + value[end:], true
+			linked = variant.replacement
+			break
 		}
 	}
-	return value, false
+	if linked == "" && replacePlain && !strings.ContainsAny(value, `/\`) {
+		linked = replacement
+	}
+	var entities []recognizedEntity
+	if linked != "" && start < end {
+		entities = append(entities, recognizedEntity{Start: start, End: end, Kind: entityFilename, Text: component, Replacement: linked, Priority: 1})
+	}
+	return p.pseudonymizePathWithEntities(field, value, entities), len(entities) > 0
 }
 
 type filenameReplacementVariant struct {

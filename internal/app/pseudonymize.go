@@ -1022,7 +1022,11 @@ func recognizePatternEntities(value string) []recognizedEntity {
 }
 
 func (p *pseudonymizer) pseudonymizePath(field, value string) string {
-	entities := p.wordReplacements.Recognize(value)
+	return p.pseudonymizePathWithEntities(field, value, nil)
+}
+
+func (p *pseudonymizer) pseudonymizePathWithEntities(field, value string, entities []recognizedEntity) string {
+	entities = append(entities, p.wordReplacements.Recognize(value)...)
 	entities = appendSubmatchEntities(entities, value, userHomePathPattern, 1, entityUsername)
 	name := normalizeFieldName(field)
 	if p.filenamesEnabled() && (strings.Contains(name, "filepath") || strings.Contains(name, "fullpath") || isPathBearingFilename(field, value)) {
@@ -1161,7 +1165,11 @@ func (p *pseudonymizer) replaceEntities(value string, entities []recognizedEntit
 	for _, entity := range selected {
 		builder.WriteString(value[position:entity.Start])
 		if entity.Replacement != "" {
-			builder.WriteString(p.configuredReplacement(entity.Text, entity.Replacement))
+			if entity.Kind == entityConfigured {
+				builder.WriteString(p.configuredReplacement(entity.Text, entity.Replacement))
+			} else {
+				builder.WriteString(entity.Replacement)
+			}
 		} else if entity.Kind == entityAzureResourceID {
 			replacement, ok := p.pseudonymizeAzureResourceID(entity.Text)
 			if !ok {
