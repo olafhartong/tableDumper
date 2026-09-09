@@ -77,6 +77,17 @@ type pseudonymizer struct {
 	pseudonymizeFilenames bool
 	initialSize           int
 	discardedMappings     int
+	generationError       error
+}
+
+// A restricted output format can have fewer values than the source data.
+// Fail the collection instead of reusing an identity or searching forever.
+type pseudonymCapacityError struct {
+	Kind entityKind
+}
+
+func (e *pseudonymCapacityError) Error() string {
+	return fmt.Sprintf("cannot allocate a unique %s pseudonym within the supported output space; collection stopped without publishing this result", e.Kind)
 }
 
 type recognizedEntity struct {
@@ -346,6 +357,9 @@ func (p *pseudonymizer) Save() error {
 }
 
 func (p *pseudonymizer) saveLocked() error {
+	if p.generationError != nil {
+		return p.generationError
+	}
 	mappings := make([]pseudonymMapping, 0, len(p.mappings))
 	for _, mapping := range p.mappings {
 		mappings = append(mappings, mapping)
@@ -428,6 +442,12 @@ func (p *pseudonymizer) PseudonymizeRows(ctx context.Context, rows []map[string]
 		value, err := p.pseudonymizeValue(ctx, "", row)
 		if err != nil {
 			return nil, err
+		}
+		p.mu.Lock()
+		generationError := p.generationError
+		p.mu.Unlock()
+		if generationError != nil {
+			return nil, generationError
 		}
 		converted, ok := value.(map[string]any)
 		if !ok {
@@ -1187,6 +1207,9 @@ func (p *pseudonymizer) replacement(kind entityKind, original string) string {
 }
 
 func (p *pseudonymizer) replacementLocked(kind entityKind, original string) string {
+	if p.generationError != nil {
+		return ""
+	}
 	if strings.TrimSpace(original) == "" {
 		return original
 	}
@@ -1196,7 +1219,12 @@ func (p *pseudonymizer) replacementLocked(kind entityKind, original string) stri
 	}
 
 	var candidate string
+	limit := pseudonymCandidateLimit(kind, original)
 	for attempt := 0; ; attempt++ {
+		if attempt == limit {
+			p.generationError = &pseudonymCapacityError{Kind: kind}
+			return ""
+		}
 		switch kind {
 		case entityEmail:
 			local, domain, ok := strings.Cut(strings.TrimSpace(original), "@")
@@ -1229,6 +1257,9 @@ func (p *pseudonymizer) replacementLocked(kind entityKind, original string) stri
 		default:
 			candidate = p.generateCandidate(kind, original, attempt)
 		}
+		if p.generationError != nil {
+			return ""
+		}
 		if owner, exists := p.used[strings.ToLower(candidate)]; !exists || owner == key {
 			break
 		}
@@ -1258,12 +1289,19 @@ func splitSubdomain(domain string) (string, string, bool) {
 }
 
 func (p *pseudonymizer) forceReplacementLocked(kind entityKind, original, candidate string) string {
+	if p.generationError != nil {
+		return ""
+	}
 	key := entityKey(kind, original)
 	if mapping, ok := p.mappings[key]; ok {
 		return mapping.Pseudonym
 	}
 	base := candidate
 	for suffix := 2; ; suffix++ {
+		if suffix > 258 {
+			p.generationError = &pseudonymCapacityError{Kind: kind}
+			return ""
+		}
 		if owner, exists := p.used[strings.ToLower(candidate)]; !exists || owner == key {
 			break
 		}
@@ -1276,7 +1314,7 @@ func (p *pseudonymizer) forceReplacementLocked(kind entityKind, original, candid
 				candidate = fmt.Sprintf("%s%d", base, suffix)
 			}
 		case entityPerson:
-			candidate = fmt.Sprintf("%s %c", base, 'A'+rune((suffix-2)%26))
+			candidate = fmt.Sprintf("%s %d", base, suffix)
 		default:
 			candidate = fmt.Sprintf("%s%d", base, suffix)
 		}
@@ -1294,15 +1332,21 @@ func entityKey(kind entityKind, original string) string {
 
 func (p *pseudonymizer) generateCandidate(kind entityKind, original string, attempt int) string {
 	digest := p.digest(kind, original, attempt)
+	// Preserve existing mappings and the first-choice friendly spelling. On a
+	// collision, add a large keyed suffix instead of retrying a tiny name pool.
+	suffix := ""
+	if attempt > 0 {
+		suffix = hex.EncodeToString(digest[16:24])
+	}
 	switch kind {
 	case entityPerson:
-		return personFirstNames[indexFromDigest(digest, 0, len(personFirstNames))] + " " + personLastNames[indexFromDigest(digest, 2, len(personLastNames))]
+		return personFirstNames[indexFromDigest(digest, 0, len(personFirstNames))] + " " + personLastNames[indexFromDigest(digest, 2, len(personLastNames))] + suffix
 	case entityOrganization:
-		return organizationAdjectives[indexFromDigest(digest, 0, len(organizationAdjectives))] + " " + organizationNouns[indexFromDigest(digest, 2, len(organizationNouns))]
+		return organizationAdjectives[indexFromDigest(digest, 0, len(organizationAdjectives))] + " " + organizationNouns[indexFromDigest(digest, 2, len(organizationNouns))] + suffix
 	case entityUsername:
 		first := personFirstNames[indexFromDigest(digest, 0, len(personFirstNames))]
 		last := personLastNames[indexFromDigest(digest, 2, len(personLastNames))]
-		return slugName(first) + "." + slugName(last)
+		return slugName(first) + "." + slugName(last) + suffix
 	case entityEmail:
 		first := personFirstNames[indexFromDigest(digest, 0, len(personFirstNames))]
 		last := personLastNames[indexFromDigest(digest, 2, len(personLastNames))]
@@ -1311,6 +1355,9 @@ func (p *pseudonymizer) generateCandidate(kind entityKind, original string, atte
 	case entityDomain:
 		name := strings.ToLower(organizationAdjectives[indexFromDigest(digest, 0, len(organizationAdjectives))] + "-" + organizationNouns[indexFromDigest(digest, 2, len(organizationNouns))])
 		name = strings.ReplaceAll(name, " ", "-")
+		if suffix != "" {
+			name += "-" + suffix
+		}
 		suffix := ".example"
 		lower := strings.ToLower(strings.TrimSpace(original))
 		if !strings.Contains(lower, ".") || strings.HasSuffix(lower, ".local") || strings.HasSuffix(lower, ".internal") || strings.HasSuffix(lower, ".lan") {
@@ -1319,8 +1366,15 @@ func (p *pseudonymizer) generateCandidate(kind entityKind, original string, atte
 		return name + suffix
 	case entityHostname:
 		role := hostnameRole(original)
-		return fmt.Sprintf("%s-%04d", role, 1+int(binary.BigEndian.Uint16(digest[:2]))%9999)
+		if suffix != "" {
+			suffix = "-" + suffix
+		}
+		return fmt.Sprintf("%s-%04d%s", role, 1+int(binary.BigEndian.Uint16(digest[:2]))%9999, suffix)
 	case entityIPAddress:
+		address, err := netip.ParseAddr(strings.TrimSpace(original))
+		if err != nil || address.Is4() {
+			return pseudonymIPv4Candidate(original, p.digest(kind, original, 0), attempt)
+		}
 		return pseudonymIPAddress(original, digest)
 	case entityMACAddress:
 		return fmt.Sprintf("02:%02x:%02x:%02x:%02x:%02x", digest[0], digest[1], digest[2], digest[3], digest[4])
@@ -1349,6 +1403,38 @@ func (p *pseudonymizer) generateCandidate(kind entityKind, original string, atte
 	default:
 		return "entity-" + hex.EncodeToString(digest[:8])
 	}
+}
+
+func pseudonymCandidateLimit(kind entityKind, original string) int {
+	if kind == entityIPAddress {
+		address, err := netip.ParseAddr(strings.TrimSpace(original))
+		if err != nil || address.Is4() {
+			if err == nil && (address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast()) {
+				return 256 * 254
+			}
+			return 3 * 254
+		}
+	}
+	return 256
+}
+
+func pseudonymIPv4Candidate(original string, digest []byte, attempt int) string {
+	first := pseudonymIPAddress(original, digest)
+	address, _ := netip.ParseAddr(first)
+	parts := address.As4()
+	if parts[0] == 10 {
+		index := (int(parts[2])*254 + int(parts[3]) - 1 + attempt) % (256 * 254)
+		return fmt.Sprintf("10.203.%d.%d", index/254, 1+index%254)
+	}
+	prefixes := []string{"192.0.2", "198.51.100", "203.0.113"}
+	base := 0
+	if parts[0] == 198 {
+		base = 254
+	} else if parts[0] == 203 {
+		base = 508
+	}
+	index := (base + int(parts[3]) - 1 + attempt) % (3 * 254)
+	return fmt.Sprintf("%s.%d", prefixes[index/254], 1+index%254)
 }
 
 func (p *pseudonymizer) digest(kind entityKind, original string, attempt int) []byte {
