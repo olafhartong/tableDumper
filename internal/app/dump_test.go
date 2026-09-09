@@ -18,32 +18,47 @@ import (
 )
 
 func TestBuildTableDumpQueries(t *testing.T) {
-	base := buildTableDumpBaseQuery("DeviceEvents", "Timestamp", "30d")
-	if base != "DeviceEvents\n| where Timestamp >= ago(30d)" {
+	base := buildTableDumpBaseQuery("DeviceEvents", "Timestamp", "30d", time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC))
+	if base != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)" {
 		t.Fatalf("unexpected base query %q", base)
 	}
-	if got := buildTableDumpCountQuery(base); got != "DeviceEvents\n| where Timestamp >= ago(30d)\n| count" {
+	if got := buildTableDumpCountQuery(base); got != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| count" {
 		t.Fatalf("unexpected count query %q", got)
 	}
-	if got := buildTableDumpPartitionCountQuery(base, 4); got != "DeviceEvents\n| where Timestamp >= ago(30d)\n| summarize Count=count() by DumpPartition=hash(tostring(pack_all()), 4)" {
+	if got := buildTableDumpPartitionCountQuery(base, `tostring(pack_array(tostring(["EventId"])))`, 4); got != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| summarize Count=count() by DumpPartition=(tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 4)" {
 		t.Fatalf("unexpected partition count query %q", got)
 	}
-	if got := buildTableDumpPartitionQuery(base, 4, 2); got != "DeviceEvents\n| where Timestamp >= ago(30d)\n| where hash(tostring(pack_all()), 4) == 2" {
+	if got := buildTableDumpPartitionQuery(base, `tostring(pack_array(tostring(["EventId"])))`, 4, 2); got != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 4) == 2" {
 		t.Fatalf("unexpected partition query %q", got)
+	}
+}
+
+func TestTableDumpCutoffUsesUTCAndSupportedPrecision(t *testing.T) {
+	cutoff := time.Date(2026, 9, 9, 14, 0, 0, 123456789, time.FixedZone("test", 2*60*60))
+	query := buildTableDumpBaseQuery("Events", "Timestamp", "1h", cutoff)
+	if strings.Count(query, "datetime(2026-09-09T12:00:00.123456Z)") != 2 || strings.Contains(query, "ago(") {
+		t.Fatalf("window is not fixed at a supported UTC precision: %s", query)
 	}
 }
 
 func TestDumpTableWithoutPartitioning(t *testing.T) {
 	var queries []string
+	var baseQuery string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := readAdvancedQueryRequest(t, r)
+		if baseQuery == "" {
+			baseQuery = strings.TrimSuffix(query, "\n| count")
+		}
+		if strings.Contains(query, "ago(") {
+			t.Error("table window is not frozen")
+		}
 		queries = append(queries, query)
 		w.Header().Set("Content-Type", "application/json")
 
 		switch query {
-		case "DeviceInfo\n| where Timestamp >= ago(30d)\n| count":
+		case baseQuery + "\n| count":
 			io.WriteString(w, `{"Schema":[{"Name":"Count","Type":"Int64"}],"Results":[{"Count":2}]}`)
-		case "DeviceInfo\n| where Timestamp >= ago(30d)":
+		case baseQuery:
 			io.WriteString(w, `{"Schema":[{"Name":"DeviceName","Type":"String"}],"Results":[{"DeviceName":"host1"},{"DeviceName":"host2"}]}`)
 		default:
 			t.Fatalf("unexpected query %q", query)
@@ -87,13 +102,20 @@ func TestDumpTableWithoutPartitioning(t *testing.T) {
 }
 
 func TestDumpTablePseudonymizesBeforeWriting(t *testing.T) {
+	var baseQuery string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := readAdvancedQueryRequest(t, r)
+		if baseQuery == "" {
+			baseQuery = strings.TrimSuffix(query, "\n| count")
+		}
+		if strings.Contains(query, "ago(") {
+			t.Error("table window is not frozen")
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch query {
-		case "DeviceInfo\n| where Timestamp >= ago(30d)\n| count":
+		case baseQuery + "\n| count":
 			io.WriteString(w, `{"Results":[{"Count":1}]}`)
-		case "DeviceInfo\n| where Timestamp >= ago(30d)":
+		case baseQuery:
 			io.WriteString(w, `{"Schema":[{"Name":"AccountUpn","Type":"String"},{"Name":"DeviceName","Type":"String"}],"Results":[{"AccountUpn":"alice@contoso.com","DeviceName":"CONTOSO-DC-01"}]}`)
 		default:
 			t.Fatalf("unexpected query %q", query)
@@ -147,27 +169,36 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 		mu.Unlock()
 
 		time.Sleep(10 * time.Millisecond)
-		fmt.Fprintf(w, `{"Schema":[{"Name":"EventId","Type":"String"}],"Results":[{"EventId":"partition-%s"}]}`, partition)
+		fmt.Fprintf(w, `{"Schema":[{"Name":"EventId","Type":"String"}],"Results":[{"EventId":"partition-%s"},{"EventId":"partition-%s-extra1"},{"EventId":"partition-%s-extra2"}]}`, partition, partition, partition)
 
 		mu.Lock()
 		activeChunks--
 		mu.Unlock()
 	}
 
+	var baseQuery string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := readAdvancedQueryRequest(t, r)
+		if baseQuery == "" {
+			baseQuery = strings.TrimSuffix(query, "\n| count")
+		}
+		if strings.Contains(query, "ago(") {
+			t.Error("table window is not frozen")
+		}
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
-		case query == "DeviceEvents\n| where Timestamp >= ago(7d)\n| count":
-			io.WriteString(w, `{"Schema":[{"Name":"Count","Type":"Int64"}],"Results":[{"Count":60001}]}`)
-		case query == "DeviceEvents\n| where Timestamp >= ago(7d)\n| summarize Count=count() by DumpPartition=hash(tostring(pack_all()), 3)":
-			io.WriteString(w, `{"Schema":[{"Name":"DumpPartition","Type":"Int64"},{"Name":"Count","Type":"Int64"}],"Results":[{"DumpPartition":0,"Count":20000},{"DumpPartition":1,"Count":20001},{"DumpPartition":2,"Count":20000}]}`)
-		case strings.Contains(query, "| where hash(tostring(pack_all()), 3) == 0"):
+		case strings.HasSuffix(query, "\n| take 0"):
+			io.WriteString(w, `{"Schema":[{"Name":"EventId","Type":"String"}],"Results":[]}`)
+		case query == baseQuery+"\n| count":
+			io.WriteString(w, `{"Schema":[{"Name":"Count","Type":"Int64"}],"Results":[{"Count":9}]}`)
+		case query == baseQuery+"\n| summarize Count=count() by DumpPartition=(tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 3)":
+			io.WriteString(w, `{"Schema":[{"Name":"DumpPartition","Type":"Int64"},{"Name":"Count","Type":"Int64"}],"Results":[{"DumpPartition":0,"Count":3},{"DumpPartition":1,"Count":3},{"DumpPartition":2,"Count":3}]}`)
+		case strings.Contains(query, "| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 3) == 0"):
 			writePartition(w, "0")
-		case strings.Contains(query, "| where hash(tostring(pack_all()), 3) == 1"):
+		case strings.Contains(query, "| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 3) == 1"):
 			writePartition(w, "1")
-		case strings.Contains(query, "| where hash(tostring(pack_all()), 3) == 2"):
+		case strings.Contains(query, "| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 3) == 2"):
 			writePartition(w, "2")
 		default:
 			t.Fatalf("unexpected query %q", query)
@@ -180,7 +211,7 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 		DumpTable:      "DeviceEvents",
 		DumpLookback:   "7d",
 		DumpTimeColumn: "Timestamp",
-		DumpRowLimit:   defaultDumpRowLimit,
+		DumpRowLimit:   4,
 		Output:         filepath.Join(t.TempDir(), "deviceevents.json"),
 		ADXExport:      true,
 	}
@@ -190,10 +221,10 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dumpTable returned error: %v", err)
 	}
-	if output.Rows != 3 {
+	if output.Rows != 9 {
 		t.Fatalf("unexpected row count %d", output.Rows)
 	}
-	if output.Stats.TotalRows != 60001 || output.Stats.Chunks != 3 || output.Stats.Partitions != 3 {
+	if output.Stats.TotalRows != 9 || output.Stats.Chunks != 3 || output.Stats.Partitions != 3 {
 		t.Fatalf("unexpected stats %#v", output.Stats)
 	}
 	for _, partition := range []string{"0", "1", "2"} {
@@ -212,7 +243,7 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 	if err := json.Unmarshal(content, &written); err != nil {
 		t.Fatalf("decode written output: %v", err)
 	}
-	if len(written.Results) != 3 {
+	if len(written.Results) != 9 {
 		t.Fatalf("unexpected written row count %d", len(written.Results))
 	}
 	if output.ADXDataPath == "" || output.ADXSchemaPath == "" {
@@ -222,7 +253,7 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read streamed ADX data file: %v", err)
 	}
-	if got := strings.Count(strings.TrimSpace(string(adxContent)), "\n") + 1; got != 3 {
+	if got := strings.Count(strings.TrimSpace(string(adxContent)), "\n") + 1; got != 9 {
 		t.Fatalf("unexpected ADX row count %d", got)
 	}
 	schemaContent, err := os.ReadFile(output.ADXSchemaPath)
@@ -246,12 +277,12 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 	progressText := progress.String()
 	for _, want := range []string{
 		"counting rows in DeviceEvents over 7d",
-		"found 60001 row(s) to dump",
+		"found 9 row(s) to dump",
 		"counting rows across 3 hash partition(s)",
 		"dumping 3 non-empty partition chunk(s) sequentially",
 		"streaming results to",
 		"completed partition",
-		"completed partitioned dump with 3 row(s)",
+		"completed partitioned dump with 9 row(s)",
 	} {
 		if !strings.Contains(progressText, want) {
 			t.Fatalf("expected progress to contain %q, got:\n%s", want, progressText)

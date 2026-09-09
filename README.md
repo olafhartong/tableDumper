@@ -167,7 +167,7 @@ Query from file:
 ./tableDumper --auth azcli --query-file query.kql --output results.json
 ```
 
-Query mode first counts the rows produced by the complete KQL pipeline. Results below `--dump-row-limit` are requested normally. Larger results are divided into deterministic hash partitions, requested sequentially, and streamed into the same `Schema`/`Results` JSON envelope used for small queries. If a result is below the row threshold but still exceeds Defender's byte-size limit, the tool automatically retries it with progressively smaller hash partitions.
+Query mode first counts the rows produced by the complete KQL pipeline. Results below `--dump-row-limit` are requested normally. Larger results use a fixed ordered tuple of scalar result columns and SHA-256 for partition assignment, are requested sequentially, and streamed into the same `Schema`/`Results` JSON envelope used for small queries. If a result is below the row threshold but still exceeds Defender's byte-size limit, the tool automatically retries it with progressively smaller hash partitions.
 
 ## Table dump
 
@@ -184,6 +184,8 @@ If the count is below `30000`, it dumps the table directly. If the count is `300
 When `--adx-export` is used with a partitioned dump, the ADX newline-delimited JSON sidecar is streamed at the same time as the main output file.
 
 `--opengraph-export` is only supported for non-partitioned queries and table dumps because building the OpenGraph payload requires all rows in memory.
+
+Table dumps reuse one fixed UTC time window across all requests. Partitioned collection validates bucket totals, returned row counts, and partition-key types before publishing. See [partition safety and limitations](docs/queries-and-dumps.md#partition-safety-and-limitations) for dynamic-only results, repeated keys, and source changes.
 
 During a table dump, progress is written to stderr. It reports the matching row count, partition sizing, and each completed partition chunk. The final summary report is still written to stdout.
 

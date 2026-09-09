@@ -78,8 +78,12 @@ func dumpPartitionedQuery(ctx context.Context, httpClient *http.Client, cfg conf
 		return tableDumpOutput{Stats: stats}, errors.New("opengraph export is not supported for partitioned queries because it requires loading all rows into memory")
 	}
 
+	key, err := resolvePartitionKey(ctx, httpClient, cfg, token, baseQuery, progress)
+	if err != nil {
+		return tableDumpOutput{Stats: stats}, err
+	}
 	for {
-		partitions, partitionCountValue, err := resolveQueryPartitionsStartingAt(ctx, httpClient, cfg, token, baseQuery, totalRows, minimumPartitions, "query results", progress)
+		partitions, partitionCountValue, err := resolveQueryPartitionsStartingAt(ctx, httpClient, cfg, token, baseQuery, key, totalRows, minimumPartitions, "query results", progress)
 		if err != nil {
 			return tableDumpOutput{Stats: stats}, err
 		}
@@ -92,7 +96,7 @@ func dumpPartitionedQuery(ctx context.Context, httpClient *http.Client, cfg conf
 			return tableDumpOutput{Stats: stats}, nil
 		}
 
-		schema, rows, adxDataPath, adxSchemaPath, err := streamQueryPartitions(ctx, httpClient, cfg, token, baseQuery, partitions, partitionCountValue, pseudonyms, "query", progress)
+		schema, rows, adxDataPath, adxSchemaPath, err := streamQueryPartitions(ctx, httpClient, cfg, token, baseQuery, key, partitions, partitionCountValue, pseudonyms, "query", progress)
 		if err == nil {
 			stats.Chunks = len(partitions)
 			stats.Partitions = partitionCountValue

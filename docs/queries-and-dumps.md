@@ -41,7 +41,19 @@ Dumps a Defender XDR advanced hunting table over a bounded time window.
 
 The table name must be a safe KQL identifier: letters or underscore first, followed by letters, digits, or underscores. The tool constructs the KQL itself and first counts matching rows. `--dump-table` is mutually exclusive with both query-input flags.
 
-Small dumps run as one query. Large dumps are divided into deterministic hash partitions based on the complete row, and those partition requests are processed sequentially. Partitioned output is streamed through an atomic temporary file so the complete result set does not need to remain in memory.
+Small dumps run as one query. Large dumps resolve the result schema once with `take 0`, then partition an ordered tuple of known scalar columns. Dynamic objects and unknown column types are excluded from the key. The same tuple and SHA-256 calculation are reused for each count, retry, and sequential download. Partitioned output is streamed through an atomic temporary file so the complete result set does not need to remain in memory.
+
+### Partition safety and limitations
+
+Scalar columns are sorted by exact column name, converted to strings, and encoded as a `pack_array` tuple. Null scalar values consistently become empty strings; equal keys share a bucket. A fixed SHA-256 prefix determines the bucket, without depending on unordered property-bag serialization or the version-dependent `hash()` algorithm. No partition field is added to exported rows.
+
+Partition counts must be unique, in range, and add up to the initial count. Every downloaded chunk must have exactly its advertised row count and retain the key columns' types. A mismatch aborts temporary outputs and keeps previously published files. These checks detect incomplete responses and many source changes; matching counts alone do not prove snapshot consistency.
+
+A result containing only dynamic/unknown columns fails safely when partitioning is needed. Project a stable scalar event identifier from the dynamic data in the original query. If too many rows have identical scalar keys, increasing the partition count cannot separate them; attempts are bounded and the collection returns an error. Small results can still be downloaded without a partition key.
+
+Free-form query mode reuses the supplied pipeline without rewriting its expressions. Use explicit absolute time bounds and immutable source values when completeness matters. Avoid `rand()`, unordered `take`, changing aggregations, and strings derived from unordered dynamic bags in a partitioned query. Late-arriving records or updates can change membership even within a fixed table time window; this API does not provide a cross-request snapshot.
+
+The partition contract follows Microsoft's documentation for [unordered `pack_all()` objects](https://learn.microsoft.com/en-us/kusto/query/pack-all-function?view=microsoft-fabric), [ordered arrays](https://learn.microsoft.com/en-us/kusto/query/pack-array-function?view=microsoft-fabric), and [stable SHA-256 hashing](https://learn.microsoft.com/en-us/kusto/query/hash-sha256-function?view=microsoft-fabric).
 
 ## `--dump-lookback`
 
@@ -55,7 +67,7 @@ Accepted values are simple KQL timespan literals such as:
 - `1.5h`
 - `30s`
 
-The value is inserted into a `ago(...)` filter. Complex KQL expressions are rejected; use `--query` or `--query-file` when the selection needs a more involved time condition.
+The collection captures one UTC cutoff before counting. Every table request uses the same half-open window: `Timestamp >= (datetime(cutoff) - lookback) and Timestamp < datetime(cutoff)` (with the configured time column). Complex KQL expressions are rejected; use `--query` or `--query-file` when the selection needs a more involved time condition.
 
 This flag has no effect unless `--dump-table` is set.
 

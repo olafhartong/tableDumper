@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type tableDumpStats struct {
@@ -37,7 +38,7 @@ type partitionCount struct {
 }
 
 func dumpTable(ctx context.Context, httpClient *http.Client, cfg config, token string, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
-	baseQuery := buildTableDumpBaseQuery(cfg.DumpTable, cfg.DumpTimeColumn, cfg.DumpLookback)
+	baseQuery := buildTableDumpBaseQuery(cfg.DumpTable, cfg.DumpTimeColumn, cfg.DumpLookback, time.Now().UTC())
 	progressf(progress, "[-] counting rows in %s over %s...", cfg.DumpTable, cfg.DumpLookback)
 	_, countResponse, err := runAdvancedQueryWithProgress(ctx, httpClient, cfg.Endpoint, token, buildTableDumpCountQuery(baseQuery), progress)
 	if err != nil {
@@ -98,7 +99,11 @@ func dumpTable(ctx context.Context, httpClient *http.Client, cfg config, token s
 	}
 
 	progressf(progress, "[-] row count is at or above %d; calculating hash partitions...", cfg.DumpRowLimit)
-	partitions, partitionCountValue, err := resolveDumpPartitions(ctx, httpClient, cfg, token, baseQuery, totalRows, progress)
+	key, err := resolvePartitionKey(ctx, httpClient, cfg, token, baseQuery, progress)
+	if err != nil {
+		return tableDumpOutput{Stats: stats}, err
+	}
+	partitions, partitionCountValue, err := resolveDumpPartitions(ctx, httpClient, cfg, token, baseQuery, key, totalRows, progress)
 	if err != nil {
 		return tableDumpOutput{Stats: stats}, err
 	}
@@ -112,7 +117,7 @@ func dumpTable(ctx context.Context, httpClient *http.Client, cfg config, token s
 		return tableDumpOutput{Stats: stats}, nil
 	}
 
-	schema, rows, adxDataPath, adxSchemaPath, err := streamTableDumpPartitions(ctx, httpClient, cfg, token, baseQuery, partitions, partitionCountValue, pseudonyms, progress)
+	schema, rows, adxDataPath, adxSchemaPath, err := streamTableDumpPartitions(ctx, httpClient, cfg, token, baseQuery, key, partitions, partitionCountValue, pseudonyms, progress)
 	if err != nil {
 		return tableDumpOutput{Stats: stats}, err
 	}
@@ -128,15 +133,15 @@ func dumpTable(ctx context.Context, httpClient *http.Client, cfg config, token s
 	}, nil
 }
 
-func resolveDumpPartitions(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, totalRows int, progress io.Writer) ([]partitionCount, int, error) {
-	return resolveQueryPartitions(ctx, httpClient, cfg, token, baseQuery, totalRows, cfg.DumpTable, progress)
+func resolveDumpPartitions(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, key queryPartitionKey, totalRows int, progress io.Writer) ([]partitionCount, int, error) {
+	return resolveQueryPartitions(ctx, httpClient, cfg, token, baseQuery, key, totalRows, cfg.DumpTable, progress)
 }
 
-func resolveQueryPartitions(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, totalRows int, description string, progress io.Writer) ([]partitionCount, int, error) {
-	return resolveQueryPartitionsStartingAt(ctx, httpClient, cfg, token, baseQuery, totalRows, 0, description, progress)
+func resolveQueryPartitions(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, key queryPartitionKey, totalRows int, description string, progress io.Writer) ([]partitionCount, int, error) {
+	return resolveQueryPartitionsStartingAt(ctx, httpClient, cfg, token, baseQuery, key, totalRows, 0, description, progress)
 }
 
-func resolveQueryPartitionsStartingAt(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, totalRows, minimumPartitions int, description string, progress io.Writer) ([]partitionCount, int, error) {
+func resolveQueryPartitionsStartingAt(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, key queryPartitionKey, totalRows, minimumPartitions int, description string, progress io.Writer) ([]partitionCount, int, error) {
 	partitionCountValue := (totalRows + cfg.DumpRowLimit - 1) / cfg.DumpRowLimit
 	if partitionCountValue < 2 {
 		partitionCountValue = 2
@@ -150,13 +155,16 @@ func resolveQueryPartitionsStartingAt(ctx context.Context, httpClient *http.Clie
 			return nil, 0, fmt.Errorf("unable to split %s into chunks below the service result-size limit after trying %d hash partitions", description, partitionCountValue)
 		}
 		progressf(progress, "[-] counting rows across %d hash partition(s)...", partitionCountValue)
-		_, response, err := runAdvancedQueryWithProgress(ctx, httpClient, cfg.Endpoint, token, buildTableDumpPartitionCountQuery(baseQuery, partitionCountValue), progress)
+		_, response, err := runAdvancedQueryWithProgress(ctx, httpClient, cfg.Endpoint, token, buildTableDumpPartitionCountQuery(baseQuery, key.expression, partitionCountValue), progress)
 		if err != nil {
 			return nil, 0, fmt.Errorf("count %s hash partitions: %w", description, err)
 		}
 		partitions, err := parsePartitionCountsResponse(response)
 		if err != nil {
 			return nil, 0, fmt.Errorf("parse %s partition counts: %w", description, err)
+		}
+		if err := validatePartitionCounts(partitions, partitionCountValue, totalRows); err != nil {
+			return nil, 0, err
 		}
 		sort.Slice(partitions, func(i, j int) bool {
 			return partitions[i].Partition < partitions[j].Partition
@@ -174,19 +182,29 @@ func resolveQueryPartitionsStartingAt(ctx context.Context, httpClient *http.Clie
 	}
 }
 
-func streamTableDumpPartitions(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, partitions []partitionCount, partitionCountValue int, pseudonyms *pseudonymizer, progress io.Writer) ([]queryColumn, int, string, string, error) {
-	return streamQueryPartitions(ctx, httpClient, cfg, token, baseQuery, partitions, partitionCountValue, pseudonyms, "dump "+cfg.DumpTable, progress)
+func streamTableDumpPartitions(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, key queryPartitionKey, partitions []partitionCount, partitionCountValue int, pseudonyms *pseudonymizer, progress io.Writer) ([]queryColumn, int, string, string, error) {
+	return streamQueryPartitions(ctx, httpClient, cfg, token, baseQuery, key, partitions, partitionCountValue, pseudonyms, "dump "+cfg.DumpTable, progress)
 }
 
-func streamQueryPartitions(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, partitions []partitionCount, partitionCountValue int, pseudonyms *pseudonymizer, description string, progress io.Writer) ([]queryColumn, int, string, string, error) {
+func streamQueryPartitions(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, key queryPartitionKey, partitions []partitionCount, partitionCountValue int, pseudonyms *pseudonymizer, description string, progress io.Writer) ([]queryColumn, int, string, string, error) {
 	var responseWriter *queryResponseStreamWriter
 	var adxWriter *ndjsonStreamWriter
 	var schema []queryColumn
+	// Abort every temporary artifact on any early return. Close/commit below
+	// renames their temporary files, making this safe on successful completion.
+	defer func() {
+		if responseWriter != nil {
+			responseWriter.Abort()
+		}
+		if adxWriter != nil {
+			adxWriter.Abort()
+		}
+	}()
 	completed := 0
 	progressf(progress, "[-] dumping %d non-empty partition chunk(s) sequentially", len(partitions))
 
 	for _, partition := range partitions {
-		query := buildTableDumpPartitionQuery(baseQuery, partitionCountValue, partition.Partition)
+		query := buildTableDumpPartitionQuery(baseQuery, key.expression, partitionCountValue, partition.Partition)
 		_, response, err := runAdvancedQueryWithProgress(ctx, httpClient, cfg.Endpoint, token, query, progress)
 		if err != nil {
 			if responseWriter != nil {
@@ -205,6 +223,12 @@ func streamQueryPartitions(ctx context.Context, httpClient *http.Client, cfg con
 				adxWriter.Abort()
 			}
 			return nil, 0, "", "", fmt.Errorf("partition %d returned %d rows, at or above the configured limit %d", partition.Partition, len(response.Results), cfg.DumpRowLimit)
+		}
+		if len(response.Results) != partition.Rows {
+			return nil, 0, "", "", fmt.Errorf("partition %d returned %d rows, expected %d; incomplete or changed results were not published", partition.Partition, len(response.Results), partition.Rows)
+		}
+		if err := key.validateSchema(response.Schema); err != nil {
+			return nil, 0, "", "", err
 		}
 		if pseudonyms != nil {
 			rows, err := pseudonyms.PseudonymizeRows(ctx, response.Results)
@@ -515,20 +539,23 @@ func createTempFileForPath(path string) (*os.File, string, error) {
 	return file, file.Name(), nil
 }
 
-func buildTableDumpBaseQuery(tableName, timeColumn, lookback string) string {
-	return fmt.Sprintf("%s\n| where %s >= ago(%s)", tableName, timeColumn, lookback)
+func buildTableDumpBaseQuery(tableName, timeColumn, lookback string, cutoff time.Time) string {
+	// Kusto datetime precision is 100 ns; use microseconds so Go's nanosecond
+	// formatting never produces an unsupported nine-digit fractional second.
+	end := cutoff.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
+	return fmt.Sprintf("%s\n| where %s >= (datetime(%s) - %s) and %s < datetime(%s)", tableName, timeColumn, end, lookback, timeColumn, end)
 }
 
 func buildTableDumpCountQuery(baseQuery string) string {
 	return baseQuery + "\n| count"
 }
 
-func buildTableDumpPartitionCountQuery(baseQuery string, partitions int) string {
-	return fmt.Sprintf("%s\n| summarize Count=count() by DumpPartition=hash(tostring(pack_all()), %d)", baseQuery, partitions)
+func buildTableDumpPartitionCountQuery(baseQuery, keyExpression string, partitions int) string {
+	return fmt.Sprintf("%s\n| summarize Count=count() by DumpPartition=%s", baseQuery, partitionExpression(keyExpression, partitions))
 }
 
-func buildTableDumpPartitionQuery(baseQuery string, partitions, partition int) string {
-	return fmt.Sprintf("%s\n| where hash(tostring(pack_all()), %d) == %d", baseQuery, partitions, partition)
+func buildTableDumpPartitionQuery(baseQuery, keyExpression string, partitions, partition int) string {
+	return fmt.Sprintf("%s\n| where %s == %d", baseQuery, partitionExpression(keyExpression, partitions), partition)
 }
 
 func parseCountResponse(response queryResponse) (int, error) {
@@ -553,9 +580,10 @@ func parsePartitionCountsResponse(response queryResponse) ([]partitionCount, err
 		if !ok {
 			return nil, fmt.Errorf("partition count row %d did not include Count", i+1)
 		}
-		if rows > 0 {
-			partitions = append(partitions, partitionCount{Partition: partition, Rows: rows})
+		if rows <= 0 {
+			return nil, fmt.Errorf("partition count row %d contains a non-positive count", i+1)
 		}
+		partitions = append(partitions, partitionCount{Partition: partition, Rows: rows})
 	}
 	return partitions, nil
 }

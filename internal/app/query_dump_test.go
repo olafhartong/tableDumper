@@ -29,14 +29,16 @@ func TestDumpQueryWithHashPartitioning(t *testing.T) {
 		query := readAdvancedQueryRequest(t, r)
 		w.Header().Set("Content-Type", "application/json")
 		switch query {
+		case baseQuery + "\n| take 0":
+			io.WriteString(w, `{ "Schema":[{"Name":"EventId","Type":"String"}],"Results":[]}`)
 		case baseQuery + "\n| count":
 			io.WriteString(w, `{"Results":[{"Count":5}]}`)
-		case baseQuery + "\n| summarize Count=count() by DumpPartition=hash(tostring(pack_all()), 2)":
+		case baseQuery + "\n| summarize Count=count() by DumpPartition=(tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 2)":
 			io.WriteString(w, `{"Results":[{"DumpPartition":0,"Count":2},{"DumpPartition":1,"Count":3}]}`)
-		case baseQuery + "\n| where hash(tostring(pack_all()), 2) == 0":
+		case baseQuery + "\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 2) == 0":
 			chunkQueries = append(chunkQueries, query)
 			io.WriteString(w, `{"Schema":[{"Name":"EventId","Type":"String"}],"Results":[{"EventId":"event-0"},{"EventId":"event-2"}]}`)
-		case baseQuery + "\n| where hash(tostring(pack_all()), 2) == 1":
+		case baseQuery + "\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 2) == 1":
 			chunkQueries = append(chunkQueries, query)
 			io.WriteString(w, `{"Schema":[{"Name":"EventId","Type":"String"}],"Results":[{"EventId":"event-1"},{"EventId":"event-3"},{"EventId":"event-4"}]}`)
 		default:
@@ -103,18 +105,20 @@ func TestDumpQueryFallsBackWhenSmallResultExceedsByteLimit(t *testing.T) {
 		query := readAdvancedQueryRequest(t, r)
 		w.Header().Set("Content-Type", "application/json")
 		switch query {
+		case baseQuery + "\n| take 0":
+			io.WriteString(w, `{ "Schema":[{"Name":"Payload","Type":"String"}],"Results":[]}`)
 		case baseQuery + "\n| count":
 			io.WriteString(w, `{"Results":[{"Count":2}]}`)
 		case baseQuery:
 			attemptedUnpartitioned = true
 			w.WriteHeader(http.StatusBadRequest)
 			io.WriteString(w, `{"error":{"code":"BadRequest","message":"Query execution has exceeded the allowed result size. Optimize your query by limiting the amount of results and try again."}}`)
-		case baseQuery + "\n| summarize Count=count() by DumpPartition=hash(tostring(pack_all()), 2)":
+		case baseQuery + "\n| summarize Count=count() by DumpPartition=(tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"Payload\"])))), 0, 15))) % 2)":
 			io.WriteString(w, `{"Results":[{"DumpPartition":0,"Count":1},{"DumpPartition":1,"Count":1}]}`)
-		case baseQuery + "\n| where hash(tostring(pack_all()), 2) == 0":
-			io.WriteString(w, `{"Results":[{"Payload":"first"}]}`)
-		case baseQuery + "\n| where hash(tostring(pack_all()), 2) == 1":
-			io.WriteString(w, `{"Results":[{"Payload":"second"}]}`)
+		case baseQuery + "\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"Payload\"])))), 0, 15))) % 2) == 0":
+			io.WriteString(w, `{"Schema":[{"Name":"Payload","Type":"String"}],"Results":[{"Payload":"first"}]}`)
+		case baseQuery + "\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"Payload\"])))), 0, 15))) % 2) == 1":
+			io.WriteString(w, `{"Schema":[{"Name":"Payload","Type":"String"}],"Results":[{"Payload":"second"}]}`)
 		default:
 			t.Fatalf("unexpected query %q", query)
 		}
