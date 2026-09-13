@@ -182,6 +182,8 @@ Every table has one of four statuses. They are never collapsed, because a reader
 | `not_captured` | The run did not collect the table, for example because a query, pseudonymization, or write failed. `note` explains why. |
 | `absent_in_source` | The source reported that the table does not exist (a Kusto "failed to resolve table" semantic error naming that table). |
 
+`captured_empty` means the source answered with no rows for the window, not that no such activity exists. Log Analytics defines its standard tables (such as `SecurityEvent` or `DeviceProcessEvents`) in every workspace, so an empty standard table can also mean that no connector ever sent that data, and tables with restricted table-level access can return no rows instead of an error.
+
 Failed and absent tables still update the manifest before the run returns its error, and the run exits with an error exactly as it would without `--manifest`.
 
 Example:
@@ -189,7 +191,7 @@ Example:
 ```json
 {
   "schema_version": 1,
-  "tool": {"name": "tableDumper", "version": "57c7290a1b2c"},
+  "tool": {"name": "tableDumper", "version": "v0.0.0-20260913095812-57c7290a1b2c"},
   "created_at": "2026-09-13T09:58:12.41Z",
   "updated_at": "2026-09-13T10:02:47.03Z",
   "pseudonymization": {"enabled": true, "mode": "irreversible", "key_id": "3f9c0a7d51e2b846"},
@@ -228,7 +230,7 @@ Rules:
 - `file` and `adx_data_file` are relative to the manifest's directory, with forward slashes. Hashes are SHA-256 over the final published files.
 - Table dumps record `time_column` and the fixed half-open `window` used by the query. Query entries have no window.
 - The manifest is validated when it is loaded and before it is written, and saved atomically with owner-only `0600` permissions. An existing invalid manifest stops the run before any query is sent.
-- A tool `version` is the module version, or the VCS revision (with `-dirty` for modified trees) for local builds.
+- A tool `version` is the module version from the build. Local builds from a Git checkout report a pseudo-version with the commit time and revision, such as `v0.0.0-20260913095812-57c7290a1b2c`, with `+dirty` for modified trees. Builds without module or VCS information record the revision if known, otherwise `(devel)` or `unknown`.
 - Runs are not locked against each other. Do not run collections that share a manifest concurrently.
 
 With `--pseudonymize`, the manifest contains no original values: no query text, no tenant or workspace ID, and failure notes record only the failure category because service errors can echo query text. It records the vault's mode and `key_id` (never the seed), so the manifest can be matched to its vault. Every run that joins a manifest must use the same pseudonymization setup; a run with pseudonymization disabled, a different vault, or a different vault mode is rejected before it collects anything. Without `--pseudonymize`, query entries record the query text and failure notes include the error. File paths are recorded as given, so do not put identifiers in output file names.
