@@ -27,6 +27,7 @@ Both sources share the same pipeline: counting, hash partitioning, pseudonymizat
 
 - `--dump-time-column` defaults to `TimeGenerated`.
 - A table dump filtering on `TimeGenerated` also sends the fixed dump window, padded by one second, as the request `timespan`. The query's own filter remains authoritative. With another `--dump-time-column`, no `timespan` is sent, because the service applies it to `TimeGenerated` and could exclude rows the query selects. Free-form queries never send a `timespan`; the query text alone defines the time range.
+- Table dumps exclude rows ingested after the cutoff, as for Defender (see [`--dump-lookback`](#--dump-lookback)). Some Log Analytics tables, such as Entra ID audit logs, can receive events many hours after their `TimeGenerated`, so choose an older window when recent data must be complete.
 - Requests ask the service for up to ten minutes (`Prefer: wait=600`). The shared `--timeout` still applies, so raise it for long-running queries.
 - The service can answer HTTP 200 with a partial result and an `error` object when a limit is reached. Such a response is never used. A result-size error triggers the same automatic hash-partition retry as Defender's result-size error, for queries and table dumps; any other partial result fails the collection.
 - HTTP 429 responses are retried with the same waiting behavior as Defender.

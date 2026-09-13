@@ -203,6 +203,9 @@ func TestLogAnalyticsTableDumpCountsThenPartitionsThroughRun(t *testing.T) {
 		if match == nil || match[1] != match[2] {
 			t.Fatalf("query does not filter the fixed TimeGenerated window: %q", request.Query)
 		}
+		if !strings.Contains(request.Query, "\n| where isnull(ingestion_time()) or ingestion_time() < datetime("+match[2]+")") {
+			t.Fatalf("query is not bounded by the ingestion-time cutoff: %q", request.Query)
+		}
 		if timespan == "" {
 			timespan = request.Timespan
 		}
