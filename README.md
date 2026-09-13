@@ -185,7 +185,7 @@ When `--adx-export` is used with a partitioned dump, the ADX newline-delimited J
 
 `--opengraph-export` is only supported for non-partitioned queries and table dumps because building the OpenGraph payload requires all rows in memory.
 
-Table dumps reuse one fixed UTC time window across all requests. Partitioned collection validates bucket totals, returned row counts, and partition-key types before publishing. See [partition safety and limitations](docs/queries-and-dumps.md#partition-safety-and-limitations) for dynamic-only results, repeated keys, and source changes.
+Table dumps reuse one fixed UTC time window and ingestion-time cutoff across all requests. Partitioned collection validates bucket totals, returned row counts, and partition-key types before publishing. See [partition safety and limitations](docs/queries-and-dumps.md#partition-safety-and-limitations) for dynamic-only results, repeated keys, and source changes.
 
 During a table dump, progress is written to stderr. It reports the matching row count, partition sizing, and each completed partition chunk. The final summary report is still written to stdout.
 

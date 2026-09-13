@@ -543,7 +543,10 @@ func buildTableDumpBaseQuery(tableName, timeColumn, lookback string, cutoff time
 	// Kusto datetime precision is 100 ns; use microseconds so Go's nanosecond
 	// formatting never produces an unsupported nine-digit fractional second.
 	end := cutoff.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
-	return fmt.Sprintf("%s\n| where %s >= (datetime(%s) - %s) and %s < datetime(%s)", tableName, timeColumn, end, lookback, timeColumn, end)
+	// Rows keep arriving for hours after their event time. Excluding rows
+	// ingested after the cutoff gives every request the same snapshot. A row
+	// without an ingestion time is kept rather than silently dropped.
+	return fmt.Sprintf("%s\n| where %s >= (datetime(%s) - %s) and %s < datetime(%s)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(%s)", tableName, timeColumn, end, lookback, timeColumn, end, end)
 }
 
 func buildTableDumpCountQuery(baseQuery string) string {
