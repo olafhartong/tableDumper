@@ -22,6 +22,8 @@ const (
 	defaultOutputFile   = "results.json"
 	defaultDumpLookback = "30d"
 	defaultDumpRowLimit = 30000
+	// Advanced hunting silently returns at most this many rows with HTTP 200.
+	maxDumpRowLimit = 100000
 )
 
 type config struct {
@@ -202,6 +204,9 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	}
 	if cfg.DumpRowLimit <= 0 {
 		return cfg, errors.New("dump row limit must be greater than zero")
+	}
+	if cfg.DumpRowLimit > maxDumpRowLimit {
+		return cfg, fmt.Errorf("dump row limit must not exceed %d, the advanced hunting result row limit", maxDumpRowLimit)
 	}
 	if cfg.DumpParallelism <= 0 {
 		return cfg, errors.New("dump parallelism must be greater than zero")

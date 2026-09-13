@@ -340,6 +340,11 @@ func TestParseFlagsRejectsUnsafeTableDumpValues(t *testing.T) {
 			args: []string{"--dump-table", "DeviceInfo", "--dump-time-column", "Timestamp | take 1"},
 			want: "invalid -dump-time-column",
 		},
+		{
+			name: "row limit above service limit",
+			args: []string{"--dump-table", "DeviceInfo", "--dump-row-limit", "100001"},
+			want: "must not exceed 100000",
+		},
 	}
 
 	for _, tt := range tests {

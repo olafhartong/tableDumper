@@ -289,3 +289,56 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 		}
 	}
 }
+
+func TestDumpTableRejectsSingleQueryRowCountMismatch(t *testing.T) {
+	var baseQuery string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := readAdvancedQueryRequest(t, r)
+		if baseQuery == "" {
+			baseQuery = strings.TrimSuffix(query, "\n| count")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch query {
+		case baseQuery + "\n| count":
+			io.WriteString(w, `{"Results":[{"Count":3}]}`)
+		case baseQuery:
+			// The service returns HTTP 200 without a truncation signal.
+			io.WriteString(w, `{"Schema":[{"Name":"DeviceName","Type":"String"}],"Results":[{"DeviceName":"host1"},{"DeviceName":"host2"}]}`)
+		default:
+			t.Fatalf("unexpected query %q", query)
+		}
+	}))
+	defer server.Close()
+
+	directory := t.TempDir()
+	pseudonyms, err := newPseudonymizer(filepath.Join(directory, "mappings.json"))
+	if err != nil {
+		t.Fatalf("newPseudonymizer returned error: %v", err)
+	}
+	cfg := config{
+		Endpoint:       server.URL,
+		DumpTable:      "DeviceInfo",
+		DumpLookback:   "30d",
+		DumpTimeColumn: "Timestamp",
+		DumpRowLimit:   defaultDumpRowLimit,
+		ADXExport:      true,
+		Output:         filepath.Join(directory, "deviceinfo.json"),
+	}
+
+	_, err = dumpTable(context.Background(), server.Client(), cfg, "token-value", pseudonyms, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "dump DeviceInfo returned 2 rows, expected 3") {
+		t.Fatalf("expected row count mismatch error, got %v", err)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatalf("read output directory: %v", err)
+	}
+	for _, entry := range entries {
+		if entry.Name() != "mappings.json" {
+			t.Fatalf("incomplete result published %s", entry.Name())
+		}
+	}
+	if pseudonyms.NewMappingCount() != 0 {
+		t.Fatalf("rows from an incomplete result were pseudonymized")
+	}
+}
