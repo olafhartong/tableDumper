@@ -17,6 +17,8 @@ Runs the supplied string as a Defender XDR advanced hunting KQL query. The tool 
 
 The result is written as the Graph hunting response envelope, containing `Schema` and `Results`. `--adx-export` and `--pseudonymize` work with both normal and partitioned results. `--opengraph-export` requires a non-partitioned result because graph construction loads all rows in memory.
 
+Values keep the Graph encoding: booleans arrive as `1`/`0` with an `@odata.type` annotation, null scalars as `{}`, and timespans as ISO 8601 durations. Graph fails with HTTP 500 when a result contains a dynamic array that mixes value types, such as `dynamic([1, "x"])`; convert such values with `tostring()` in the query.
+
 ## `--query-file`
 
 Reads KQL from a file and trims surrounding whitespace. It uses the same count and automatic partitioning pipeline as `--query`.

@@ -473,12 +473,15 @@ func buildADXMappingJSON(defs []adxColumnDef) ([]byte, error) {
 }
 
 func defenderTypeToADXType(in string) string {
+	// Advanced hunting reports .NET type names: bool is SByte and decimal is
+	// SqlDecimal. TimeSpan stays dynamic because Graph returns ISO 8601
+	// durations, which Kusto does not parse as timespan values.
 	switch strings.ToLower(strings.TrimSpace(in)) {
-	case "bool", "boolean":
+	case "bool", "boolean", "sbyte":
 		return "bool"
 	case "date", "datetime":
 		return "datetime"
-	case "decimal":
+	case "decimal", "sqldecimal":
 		return "decimal"
 	case "double", "float", "real":
 		return "real"

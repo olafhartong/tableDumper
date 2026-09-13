@@ -409,3 +409,22 @@ func TestInspectADXMgmtResponseAcceptsInlineIngestWithExtent(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestDefenderTypeToADXTypeMapsGraphTypeNames(t *testing.T) {
+	for graphType, want := range map[string]string{
+		"Int64":      "long",
+		"Int32":      "int",
+		"Double":     "real",
+		"String":     "string",
+		"DateTime":   "datetime",
+		"Guid":       "guid",
+		"SByte":      "bool",
+		"SqlDecimal": "decimal",
+		"TimeSpan":   "dynamic",
+		"Object":     "dynamic",
+	} {
+		if got := defenderTypeToADXType(graphType); got != want {
+			t.Errorf("defenderTypeToADXType(%q) = %q, want %q", graphType, got, want)
+		}
+	}
+}
