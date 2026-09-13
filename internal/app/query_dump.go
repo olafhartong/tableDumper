@@ -9,10 +9,10 @@ import (
 	"strings"
 )
 
-func dumpQuery(ctx context.Context, httpClient *http.Client, cfg config, token, query string, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
+func dumpQuery(ctx context.Context, source querySource, cfg config, query string, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
 	baseQuery := partitionableQuery(query)
 	progressf(progress, "[-] counting rows returned by query...")
-	_, countResponse, err := runAdvancedQueryWithProgress(ctx, httpClient, cfg.Endpoint, token, buildTableDumpCountQuery(baseQuery), progress)
+	countResponse, err := source.RunQuery(ctx, buildTableDumpCountQuery(baseQuery), progress)
 	if err != nil {
 		return tableDumpOutput{}, fmt.Errorf("count query rows: %w", err)
 	}
@@ -26,13 +26,13 @@ func dumpQuery(ctx context.Context, httpClient *http.Client, cfg config, token, 
 
 	if totalRows < cfg.DumpRowLimit {
 		progressf(progress, "[i] row count is below %d; running query without partitioning...", cfg.DumpRowLimit)
-		_, response, err := runAdvancedQueryWithProgress(ctx, httpClient, cfg.Endpoint, token, baseQuery, progress)
+		response, err := source.RunQuery(ctx, baseQuery, progress)
 		if err != nil {
-			if !isQueryResultSizeExceeded(err) {
+			if !source.IsResultSizeExceeded(err) {
 				return tableDumpOutput{Stats: stats}, err
 			}
 			progressf(progress, "[i] unpartitioned query exceeded the service result-size limit; retrying with hash partitions...")
-			return dumpPartitionedQuery(ctx, httpClient, cfg, token, baseQuery, totalRows, 2, stats, pseudonyms, progress)
+			return dumpPartitionedQuery(ctx, source, cfg, baseQuery, totalRows, 2, stats, pseudonyms, progress)
 		}
 		if pseudonyms != nil {
 			response, err = pseudonyms.PseudonymizeResponse(ctx, response)
@@ -70,20 +70,20 @@ func dumpQuery(ctx context.Context, httpClient *http.Client, cfg config, token, 
 	}
 
 	progressf(progress, "[-] row count is at or above %d; calculating hash partitions...", cfg.DumpRowLimit)
-	return dumpPartitionedQuery(ctx, httpClient, cfg, token, baseQuery, totalRows, 0, stats, pseudonyms, progress)
+	return dumpPartitionedQuery(ctx, source, cfg, baseQuery, totalRows, 0, stats, pseudonyms, progress)
 }
 
-func dumpPartitionedQuery(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, totalRows, minimumPartitions int, stats tableDumpStats, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
+func dumpPartitionedQuery(ctx context.Context, source querySource, cfg config, baseQuery string, totalRows, minimumPartitions int, stats tableDumpStats, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
 	if cfg.OpenGraphExport {
 		return tableDumpOutput{Stats: stats}, errors.New("opengraph export is not supported for partitioned queries because it requires loading all rows into memory")
 	}
 
-	key, err := resolvePartitionKey(ctx, httpClient, cfg, token, baseQuery, progress)
+	key, err := resolvePartitionKey(ctx, source, baseQuery, progress)
 	if err != nil {
 		return tableDumpOutput{Stats: stats}, err
 	}
 	for {
-		partitions, partitionCountValue, err := resolveQueryPartitionsStartingAt(ctx, httpClient, cfg, token, baseQuery, key, totalRows, minimumPartitions, "query results", progress)
+		partitions, partitionCountValue, err := resolveQueryPartitionsStartingAt(ctx, source, cfg, baseQuery, key, totalRows, minimumPartitions, "query results", progress)
 		if err != nil {
 			return tableDumpOutput{Stats: stats}, err
 		}
@@ -96,7 +96,7 @@ func dumpPartitionedQuery(ctx context.Context, httpClient *http.Client, cfg conf
 			return tableDumpOutput{Stats: stats}, nil
 		}
 
-		schema, rows, adxDataPath, adxSchemaPath, err := streamQueryPartitions(ctx, httpClient, cfg, token, baseQuery, key, partitions, partitionCountValue, pseudonyms, "query", progress)
+		schema, rows, adxDataPath, adxSchemaPath, err := streamQueryPartitions(ctx, source, cfg, baseQuery, key, partitions, partitionCountValue, pseudonyms, "query", progress)
 		if err == nil {
 			stats.Chunks = len(partitions)
 			stats.Partitions = partitionCountValue
@@ -109,7 +109,7 @@ func dumpPartitionedQuery(ctx context.Context, httpClient *http.Client, cfg conf
 				ADXSchemaPath: adxSchemaPath,
 			}, nil
 		}
-		if !isQueryResultSizeExceeded(err) {
+		if !source.IsResultSizeExceeded(err) {
 			return tableDumpOutput{Stats: stats}, err
 		}
 		if maxPartitionRows(partitions) <= 1 {

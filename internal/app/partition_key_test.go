@@ -129,7 +129,7 @@ func TestPartitionFailurePreservesPublishedArtifacts(t *testing.T) {
 				}
 			}))
 			defer server.Close()
-			_, err := dumpQuery(context.Background(), server.Client(), config{Endpoint: server.URL, Output: output, DumpRowLimit: 3, ADXExport: true}, "token-value", "Events", nil, io.Discard)
+			_, err := dumpQuery(context.Background(), newDefenderQuerySource(server.Client(), server.URL, "token-value"), config{Endpoint: server.URL, Output: output, DumpRowLimit: 3, ADXExport: true}, "Events", nil, io.Discard)
 			if err == nil {
 				t.Fatal("incomplete/unsafe partitioning succeeded")
 			}
@@ -186,7 +186,7 @@ func TestPartitionRetryReusesResolvedKey(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	out, err := dumpQuery(context.Background(), server.Client(), config{Endpoint: server.URL, DumpRowLimit: 4, Output: filepath.Join(t.TempDir(), "results.json")}, "token-value", "Events", nil, io.Discard)
+	out, err := dumpQuery(context.Background(), newDefenderQuerySource(server.Client(), server.URL, "token-value"), config{Endpoint: server.URL, DumpRowLimit: 4, Output: filepath.Join(t.TempDir(), "results.json")}, "Events", nil, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +215,7 @@ func TestIndivisibleScalarKeysFailWithinBoundedRequests(t *testing.T) {
 	}))
 	defer server.Close()
 	path := filepath.Join(t.TempDir(), "results.json")
-	_, err := dumpQuery(context.Background(), server.Client(), config{Endpoint: server.URL, DumpRowLimit: 4, Output: path}, "token-value", "Events", nil, io.Discard)
+	_, err := dumpQuery(context.Background(), newDefenderQuerySource(server.Client(), server.URL, "token-value"), config{Endpoint: server.URL, DumpRowLimit: 4, Output: path}, "Events", nil, io.Discard)
 	if err == nil || counts != 2 {
 		t.Fatalf("expected bounded partition failure, got %v after %d counts", err, counts)
 	}

@@ -75,7 +75,7 @@ func TestDumpTableWithoutPartitioning(t *testing.T) {
 		Output:         filepath.Join(t.TempDir(), "deviceinfo.json"),
 	}
 
-	output, err := dumpTable(context.Background(), server.Client(), cfg, "token-value", nil, io.Discard)
+	output, err := dumpTable(context.Background(), newDefenderQuerySource(server.Client(), server.URL, "token-value"), cfg, nil, io.Discard)
 	if err != nil {
 		t.Fatalf("dumpTable returned error: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestDumpTablePseudonymizesBeforeWriting(t *testing.T) {
 		Output:         filepath.Join(directory, "deviceinfo.json"),
 	}
 
-	if _, err := dumpTable(context.Background(), server.Client(), cfg, "token-value", pseudonyms, io.Discard); err != nil {
+	if _, err := dumpTable(context.Background(), newDefenderQuerySource(server.Client(), server.URL, "token-value"), cfg, pseudonyms, io.Discard); err != nil {
 		t.Fatalf("dumpTable returned error: %v", err)
 	}
 	body, err := os.ReadFile(cfg.Output)
@@ -217,7 +217,7 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 	}
 
 	var progress bytes.Buffer
-	output, err := dumpTable(context.Background(), server.Client(), cfg, "token-value", nil, &progress)
+	output, err := dumpTable(context.Background(), newDefenderQuerySource(server.Client(), server.URL, "token-value"), cfg, nil, &progress)
 	if err != nil {
 		t.Fatalf("dumpTable returned error: %v", err)
 	}

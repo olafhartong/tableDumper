@@ -71,12 +71,12 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return err
 		}
 
-		token, authMode, err := acquireToken(ctx, httpClient, mdeAuthConfig(cfg))
+		source, authMode, err := newQuerySource(ctx, httpClient, cfg)
 		if err != nil {
 			return err
 		}
 
-		output, err := dumpQuery(ctx, httpClient, cfg, token, query, pseudonyms, stderr)
+		output, err := dumpQuery(ctx, source, cfg, query, pseudonyms, stderr)
 		if err != nil {
 			return err
 		}
@@ -117,12 +117,12 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 
 	if cfg.DumpTable != "" {
-		token, authMode, err := acquireToken(ctx, httpClient, mdeAuthConfig(cfg))
+		source, authMode, err := newQuerySource(ctx, httpClient, cfg)
 		if err != nil {
 			return err
 		}
 
-		output, err := dumpTable(ctx, httpClient, cfg, token, pseudonyms, stderr)
+		output, err := dumpTable(ctx, source, cfg, pseudonyms, stderr)
 		if err != nil {
 			return err
 		}

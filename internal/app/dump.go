@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,10 +36,15 @@ type partitionCount struct {
 	Rows      int
 }
 
-func dumpTable(ctx context.Context, httpClient *http.Client, cfg config, token string, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
-	baseQuery := buildTableDumpBaseQuery(cfg.DumpTable, cfg.DumpTimeColumn, cfg.DumpLookback, time.Now().UTC())
+func dumpTable(ctx context.Context, source querySource, cfg config, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
+	cutoff := time.Now().UTC()
+	baseQuery := buildTableDumpBaseQuery(cfg.DumpTable, cfg.DumpTimeColumn, cfg.DumpLookback, cutoff)
+	source, err := withTableDumpTimespan(source, cfg, cutoff, progress)
+	if err != nil {
+		return tableDumpOutput{}, err
+	}
 	progressf(progress, "[-] counting rows in %s over %s...", cfg.DumpTable, cfg.DumpLookback)
-	_, countResponse, err := runAdvancedQueryWithProgress(ctx, httpClient, cfg.Endpoint, token, buildTableDumpCountQuery(baseQuery), progress)
+	countResponse, err := source.RunQuery(ctx, buildTableDumpCountQuery(baseQuery), progress)
 	if err != nil {
 		return tableDumpOutput{}, fmt.Errorf("count rows in %s: %w", cfg.DumpTable, err)
 	}
@@ -54,7 +58,7 @@ func dumpTable(ctx context.Context, httpClient *http.Client, cfg config, token s
 	progressf(progress, "[i] found %d row(s) to dump from %s", totalRows, cfg.DumpTable)
 	if totalRows < cfg.DumpRowLimit {
 		progressf(progress, "[i] row count is below %d; dumping in a single query...", cfg.DumpRowLimit)
-		_, response, err := runAdvancedQueryWithProgress(ctx, httpClient, cfg.Endpoint, token, baseQuery, progress)
+		response, err := source.RunQuery(ctx, baseQuery, progress)
 		if err != nil {
 			return tableDumpOutput{Stats: stats}, fmt.Errorf("dump %s: %w", cfg.DumpTable, err)
 		}
@@ -99,11 +103,11 @@ func dumpTable(ctx context.Context, httpClient *http.Client, cfg config, token s
 	}
 
 	progressf(progress, "[-] row count is at or above %d; calculating hash partitions...", cfg.DumpRowLimit)
-	key, err := resolvePartitionKey(ctx, httpClient, cfg, token, baseQuery, progress)
+	key, err := resolvePartitionKey(ctx, source, baseQuery, progress)
 	if err != nil {
 		return tableDumpOutput{Stats: stats}, err
 	}
-	partitions, partitionCountValue, err := resolveDumpPartitions(ctx, httpClient, cfg, token, baseQuery, key, totalRows, progress)
+	partitions, partitionCountValue, err := resolveDumpPartitions(ctx, source, cfg, baseQuery, key, totalRows, progress)
 	if err != nil {
 		return tableDumpOutput{Stats: stats}, err
 	}
@@ -117,7 +121,7 @@ func dumpTable(ctx context.Context, httpClient *http.Client, cfg config, token s
 		return tableDumpOutput{Stats: stats}, nil
 	}
 
-	schema, rows, adxDataPath, adxSchemaPath, err := streamTableDumpPartitions(ctx, httpClient, cfg, token, baseQuery, key, partitions, partitionCountValue, pseudonyms, progress)
+	schema, rows, adxDataPath, adxSchemaPath, err := streamTableDumpPartitions(ctx, source, cfg, baseQuery, key, partitions, partitionCountValue, pseudonyms, progress)
 	if err != nil {
 		return tableDumpOutput{Stats: stats}, err
 	}
@@ -133,15 +137,37 @@ func dumpTable(ctx context.Context, httpClient *http.Client, cfg config, token s
 	}, nil
 }
 
-func resolveDumpPartitions(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, key queryPartitionKey, totalRows int, progress io.Writer) ([]partitionCount, int, error) {
-	return resolveQueryPartitions(ctx, httpClient, cfg, token, baseQuery, key, totalRows, cfg.DumpTable, progress)
+// withTableDumpTimespan gives sources with a service-side time range one that
+// covers the fixed dump window. That range filters TimeGenerated, so it is not
+// sent for another time column, where it could drop rows the query selects.
+func withTableDumpTimespan(source querySource, cfg config, cutoff time.Time, progress io.Writer) (querySource, error) {
+	windowed, ok := source.(timespanQuerySource)
+	if !ok {
+		return source, nil
+	}
+	if cfg.DumpTimeColumn != logAnalyticsTimeColumn {
+		progressf(progress, "[i] not sending a service timespan because the dump filters on %s rather than %s", cfg.DumpTimeColumn, logAnalyticsTimeColumn)
+		return source, nil
+	}
+	lookback, err := kqlTimespanDuration(cfg.DumpLookback)
+	if err != nil {
+		return nil, err
+	}
+	// The query filter stays authoritative. One second of padding keeps the
+	// service's boundary handling from excluding rows at the window edges.
+	end := cutoff.UTC().Truncate(time.Microsecond)
+	return windowed.withTimespan(end.Add(-lookback-time.Second), end.Add(time.Second)), nil
 }
 
-func resolveQueryPartitions(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, key queryPartitionKey, totalRows int, description string, progress io.Writer) ([]partitionCount, int, error) {
-	return resolveQueryPartitionsStartingAt(ctx, httpClient, cfg, token, baseQuery, key, totalRows, 0, description, progress)
+func resolveDumpPartitions(ctx context.Context, source querySource, cfg config, baseQuery string, key queryPartitionKey, totalRows int, progress io.Writer) ([]partitionCount, int, error) {
+	return resolveQueryPartitions(ctx, source, cfg, baseQuery, key, totalRows, cfg.DumpTable, progress)
 }
 
-func resolveQueryPartitionsStartingAt(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, key queryPartitionKey, totalRows, minimumPartitions int, description string, progress io.Writer) ([]partitionCount, int, error) {
+func resolveQueryPartitions(ctx context.Context, source querySource, cfg config, baseQuery string, key queryPartitionKey, totalRows int, description string, progress io.Writer) ([]partitionCount, int, error) {
+	return resolveQueryPartitionsStartingAt(ctx, source, cfg, baseQuery, key, totalRows, 0, description, progress)
+}
+
+func resolveQueryPartitionsStartingAt(ctx context.Context, source querySource, cfg config, baseQuery string, key queryPartitionKey, totalRows, minimumPartitions int, description string, progress io.Writer) ([]partitionCount, int, error) {
 	partitionCountValue := (totalRows + cfg.DumpRowLimit - 1) / cfg.DumpRowLimit
 	if partitionCountValue < 2 {
 		partitionCountValue = 2
@@ -155,7 +181,7 @@ func resolveQueryPartitionsStartingAt(ctx context.Context, httpClient *http.Clie
 			return nil, 0, fmt.Errorf("unable to split %s into chunks below the service result-size limit after trying %d hash partitions", description, partitionCountValue)
 		}
 		progressf(progress, "[-] counting rows across %d hash partition(s)...", partitionCountValue)
-		_, response, err := runAdvancedQueryWithProgress(ctx, httpClient, cfg.Endpoint, token, buildTableDumpPartitionCountQuery(baseQuery, key.expression, partitionCountValue), progress)
+		response, err := source.RunQuery(ctx, buildTableDumpPartitionCountQuery(baseQuery, key.expression, partitionCountValue), progress)
 		if err != nil {
 			return nil, 0, fmt.Errorf("count %s hash partitions: %w", description, err)
 		}
@@ -182,11 +208,11 @@ func resolveQueryPartitionsStartingAt(ctx context.Context, httpClient *http.Clie
 	}
 }
 
-func streamTableDumpPartitions(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, key queryPartitionKey, partitions []partitionCount, partitionCountValue int, pseudonyms *pseudonymizer, progress io.Writer) ([]queryColumn, int, string, string, error) {
-	return streamQueryPartitions(ctx, httpClient, cfg, token, baseQuery, key, partitions, partitionCountValue, pseudonyms, "dump "+cfg.DumpTable, progress)
+func streamTableDumpPartitions(ctx context.Context, source querySource, cfg config, baseQuery string, key queryPartitionKey, partitions []partitionCount, partitionCountValue int, pseudonyms *pseudonymizer, progress io.Writer) ([]queryColumn, int, string, string, error) {
+	return streamQueryPartitions(ctx, source, cfg, baseQuery, key, partitions, partitionCountValue, pseudonyms, "dump "+cfg.DumpTable, progress)
 }
 
-func streamQueryPartitions(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, key queryPartitionKey, partitions []partitionCount, partitionCountValue int, pseudonyms *pseudonymizer, description string, progress io.Writer) ([]queryColumn, int, string, string, error) {
+func streamQueryPartitions(ctx context.Context, source querySource, cfg config, baseQuery string, key queryPartitionKey, partitions []partitionCount, partitionCountValue int, pseudonyms *pseudonymizer, description string, progress io.Writer) ([]queryColumn, int, string, string, error) {
 	var responseWriter *queryResponseStreamWriter
 	var adxWriter *ndjsonStreamWriter
 	var schema []queryColumn
@@ -205,7 +231,7 @@ func streamQueryPartitions(ctx context.Context, httpClient *http.Client, cfg con
 
 	for _, partition := range partitions {
 		query := buildTableDumpPartitionQuery(baseQuery, key.expression, partitionCountValue, partition.Partition)
-		_, response, err := runAdvancedQueryWithProgress(ctx, httpClient, cfg.Endpoint, token, query, progress)
+		response, err := source.RunQuery(ctx, query, progress)
 		if err != nil {
 			if responseWriter != nil {
 				responseWriter.Abort()

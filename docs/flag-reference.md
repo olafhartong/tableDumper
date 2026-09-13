@@ -4,15 +4,19 @@ This page lists every flag registered by the application. Follow the guide link 
 
 | Flag | Value | Default or environment | Purpose | Guide |
 |---|---|---|---|---|
-| `--auth` | `auto`, `sp`, `azcli`, `none` | `auto` | Select token acquisition mode for Graph and ADX actions. | [Authentication](authentication-and-networking.md#--auth) |
-| `--tenant-id` | string | `AZURE_TENANT_ID` | Microsoft Entra tenant for Defender/Graph authentication. | [Authentication](authentication-and-networking.md#--tenant-id) |
-| `--client-id` | string | `AZURE_CLIENT_ID` | Service-principal application ID for Defender/Graph. | [Authentication](authentication-and-networking.md#--client-id) |
-| `--client-secret` | string | `AZURE_CLIENT_SECRET` | Service-principal secret for Defender/Graph. | [Authentication](authentication-and-networking.md#--client-secret) |
-| `--query` | KQL string | empty | Run an inline Defender XDR advanced hunting query. | [Queries](queries-and-dumps.md#--query) |
-| `--query-file` | path | empty | Read the Defender XDR query from a UTF-8 text file. | [Queries](queries-and-dumps.md#--query-file) |
-| `--dump-table` | identifier | empty | Collect a whole advanced hunting table over a lookback window. | [Table dumps](queries-and-dumps.md#--dump-table) |
+| `--source` | `defender`, `loganalytics` | `defender` | Select Defender XDR advanced hunting or a Log Analytics (Microsoft Sentinel) workspace as the query source. | [Sources](queries-and-dumps.md#--source) |
+| `--workspace-id` | GUID | `LOG_ANALYTICS_WORKSPACE_ID` | Log Analytics workspace queried by `--source loganalytics`. | [Log Analytics](authentication-and-networking.md#--workspace-id) |
+| `--la-endpoint` | URI | `https://api.loganalytics.azure.com/v1` | Override the Log Analytics query API base URL. | [Networking](authentication-and-networking.md#--la-endpoint) |
+| `--la-resource` | URI | `https://api.loganalytics.io` | Override the Log Analytics OAuth audience. | [Networking](authentication-and-networking.md#--la-resource) |
+| `--auth` | `auto`, `sp`, `azcli`, `none` | `auto` | Select token acquisition mode for Graph, Log Analytics, and ADX actions. | [Authentication](authentication-and-networking.md#--auth) |
+| `--tenant-id` | string | `AZURE_TENANT_ID` | Microsoft Entra tenant for Defender/Graph and Log Analytics authentication. | [Authentication](authentication-and-networking.md#--tenant-id) |
+| `--client-id` | string | `AZURE_CLIENT_ID` | Service-principal application ID for Defender/Graph and Log Analytics. | [Authentication](authentication-and-networking.md#--client-id) |
+| `--client-secret` | string | `AZURE_CLIENT_SECRET` | Service-principal secret for Defender/Graph and Log Analytics. | [Authentication](authentication-and-networking.md#--client-secret) |
+| `--query` | KQL string | empty | Run an inline KQL query against the selected source. | [Queries](queries-and-dumps.md#--query) |
+| `--query-file` | path | empty | Read the KQL query from a UTF-8 text file. | [Queries](queries-and-dumps.md#--query-file) |
+| `--dump-table` | identifier | empty | Collect a whole advanced hunting or Log Analytics table over a lookback window. | [Table dumps](queries-and-dumps.md#--dump-table) |
 | `--dump-lookback` | KQL timespan | `30d` | Set the time window for a table dump. | [Table dumps](queries-and-dumps.md#--dump-lookback) |
-| `--dump-time-column` | identifier | `Timestamp` | Select the table column used for lookback filtering. | [Table dumps](queries-and-dumps.md#--dump-time-column) |
+| `--dump-time-column` | identifier | `Timestamp`; `TimeGenerated` for `loganalytics` | Select the table column used for lookback filtering. | [Table dumps](queries-and-dumps.md#--dump-time-column) |
 | `--dump-row-limit` | positive integer | `30000` | Set the query and table-dump threshold that triggers hash partitioning. | [Queries and dumps](queries-and-dumps.md#--dump-row-limit) |
 | `--dump-parallelism` | positive integer | `1` | Deprecated compatibility option; requests remain sequential. | [Table dumps](queries-and-dumps.md#--dump-parallelism) |
 | `--output` | path | `results.json` | Set the main Defender query or dump output path. | [Output](queries-and-dumps.md#--output) |

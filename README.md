@@ -4,6 +4,7 @@ Small Go CLI to:
 
 - run a Microsoft Defender XDR advanced hunting query through Microsoft Graph, automatically partitioning large result sets, and write the JSON response to disk
 - dump a whole Defender XDR advanced hunting table over a lookback window, partitioning large dumps into chunks automatically
+- run the same queries and table dumps against a Log Analytics (Microsoft Sentinel) workspace
 - generate Azure Data Explorer ingestion artifacts from those results
 - generate a BloodHound OpenGraph JSON payload from graph-shaped Defender results
 - upload a JSON file into an Azure Data Explorer table in configurable batches
@@ -86,7 +87,21 @@ Detailed documentation for every command-line flag is available in [docs/README.
   --adx-upload-file defender-results.adx.json
 ```
 
-### 6. Pseudonymize a collection
+### 6. Dump a Microsoft Sentinel / Log Analytics table
+
+```bash
+./tableDumper \
+  --auth azcli \
+  --source loganalytics \
+  --workspace-id <workspace-id> \
+  --dump-table SigninLogs \
+  --dump-lookback 7d \
+  --output signinlogs.json
+```
+
+`--source loganalytics` uses the Log Analytics query API with the same credentials, a `TimeGenerated` default time column, and the same partitioning, pseudonymization, and ADX export. The identity needs the Log Analytics Reader role on the workspace. See [query sources](docs/queries-and-dumps.md#--source).
+
+### 7. Pseudonymize a collection
 
 ```bash
 ./tableDumper \
@@ -428,6 +443,22 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 `--client-secret`
 - Service principal client secret for Microsoft Graph Defender XDR query auth
 
+`--source`
+- Query source: `defender` or `loganalytics`
+- Default: `defender`
+
+`--workspace-id`
+- Log Analytics workspace ID GUID for `--source loganalytics`
+- Can also be set with `LOG_ANALYTICS_WORKSPACE_ID`
+
+`--la-endpoint`
+- Log Analytics query API base URL
+- Default: `https://api.loganalytics.azure.com/v1`
+
+`--la-resource`
+- Log Analytics OAuth resource
+- Default: `https://api.loganalytics.io`
+
 `--query`
 - Inline Defender XDR KQL query
 
@@ -444,7 +475,7 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 
 `--dump-time-column`
 - Table time column used for the lookback filter
-- Default: `Timestamp`
+- Default: `Timestamp`, or `TimeGenerated` with `--source loganalytics`
 
 `--dump-row-limit`
 - Maximum rows per query or table-dump chunk before partitioning
@@ -592,3 +623,5 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 ## Permissions
 
 For query mode, your app registration needs the Microsoft Graph `ThreatHunting.Read.All` application permission, and admin consent must be granted.
+
+For `--source loganalytics`, the identity needs the Log Analytics Reader role (or Reader / Microsoft Sentinel Reader) on the workspace instead.

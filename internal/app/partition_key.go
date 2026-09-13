@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,9 +17,9 @@ type queryPartitionKey struct {
 	columns    []queryColumn
 }
 
-func resolvePartitionKey(ctx context.Context, client *http.Client, cfg config, token, baseQuery string, progress io.Writer) (queryPartitionKey, error) {
+func resolvePartitionKey(ctx context.Context, source querySource, baseQuery string, progress io.Writer) (queryPartitionKey, error) {
 	progressf(progress, "[-] resolving scalar result columns for stable partition keys...")
-	_, response, err := runAdvancedQueryWithProgress(ctx, client, cfg.Endpoint, token, baseQuery+"\n| take 0", progress)
+	response, err := source.RunQuery(ctx, baseQuery+"\n| take 0", progress)
 	if err != nil {
 		return queryPartitionKey{}, fmt.Errorf("resolve partition schema: %w", err)
 	}
