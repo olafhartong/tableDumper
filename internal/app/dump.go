@@ -122,8 +122,9 @@ func withTableDumpTimespan(source querySource, cfg config, cutoff time.Time, pro
 	if err != nil {
 		return nil, err
 	}
-	// The query filter stays authoritative. One second of padding keeps the
-	// service's boundary handling from excluding rows at the window edges.
+	// The query filter stays authoritative. The service applies the timespan
+	// as a half-open [start, end) range on TimeGenerated, like the query; one
+	// second of padding only guards against rounding of the timespan values.
 	end := cutoff.UTC().Truncate(time.Microsecond)
 	return windowed.withTimespan(end.Add(-lookback-time.Second), end.Add(time.Second)), nil
 }

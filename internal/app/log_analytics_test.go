@@ -86,7 +86,7 @@ func TestParseLogAnalyticsResponseNormalizesArrayRows(t *testing.T) {
 		`{"name":"ConditionalAccessPolicies","type":"dynamic"},{"name":"Latency","type":"timespan"},{"name":"RiskScore","type":"decimal"},` +
 		`{"name":"ResultDescription","type":"string"}],"rows":[` +
 		`["2026-09-01T10:15:00.1234567Z","j.doe@contoso.com","74be27de-1e4e-49d9-b579-fe0b331d3642",1234,true,"{\"city\":\"Utrecht\",\"geoCoordinates\":{\"latitude\":52.09}}","[]","00:00:10","0.10101",null],` +
-		`["2026-09-01T10:16:00.9Z","bob.vance@fabrikam.com","0b3a5e2f-8c1d-4f6a-9e7b-2c4d6e8f0a1b",0,false,"\"plain dynamic string\"","[{\"id\":\"policy\"}]","00:00:00.5","1",""]]}]}`
+		`["2026-09-01T10:16:00.9Z","bob.vance@fabrikam.com","0b3a5e2f-8c1d-4f6a-9e7b-2c4d6e8f0a1b",0,false,"plain dynamic string","[{\"id\":\"policy\"}]","00:00:00.5","1",""]]}]}`
 	response, err := parseLogAnalyticsResponse([]byte(body))
 	if err != nil {
 		t.Fatal(err)
@@ -108,8 +108,17 @@ func TestParseLogAnalyticsResponseNormalizesArrayRows(t *testing.T) {
 	if policies, ok := first["ConditionalAccessPolicies"].([]any); !ok || len(policies) != 0 {
 		t.Fatalf("dynamic array was not decoded: %#v", first["ConditionalAccessPolicies"])
 	}
-	if second := response.Results[1]; second["LocationDetails"] != `"plain dynamic string"` || second["ResultDescription"] != "" {
+	// The service sends dynamic scalars as their raw text: dynamic("text") is
+	// "text" and dynamic(5) is "5". They are kept as strings.
+	if second := response.Results[1]; second["LocationDetails"] != "plain dynamic string" || second["ResultDescription"] != "" {
 		t.Fatalf("non-container dynamic or empty string changed: %#v", second)
+	}
+	scalars, err := parseLogAnalyticsResponse([]byte(`{"tables":[{"name":"PrimaryResult","columns":[{"name":"Value","type":"dynamic"}],"rows":[["5"],[null]]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scalars.Results[0]["Value"] != "5" || scalars.Results[1]["Value"] != nil {
+		t.Fatalf("dynamic scalar or null changed: %#v", scalars.Results)
 	}
 
 	// The same columns under Defender's type spelling must produce the same
@@ -360,9 +369,9 @@ func TestQuerySourcesRecognizeMissingTables(t *testing.T) {
 	defender := newDefenderQuerySource(nil, "", "")
 	la := &logAnalyticsSource{}
 	defenderMissing := &advancedQueryError{StatusCode: http.StatusBadRequest, Body: `{"error":{"code":"BadRequest","message":"'where' operator: Failed to resolve table or column expression named 'SigninLogs'. Fix semantic errors in your query.","innerError":{"date":"2026-09-13T10:00:00","request-id":"2a1e0b6c-0000-0000-0000-000000000000"}}}`}
-	defenderColumn := &advancedQueryError{StatusCode: http.StatusBadRequest, Body: `{"error":{"code":"BadRequest","message":"'where' operator: Failed to resolve scalar expression named 'Timestamp'. Fix semantic errors in your query."}}`}
+	defenderColumn := &advancedQueryError{StatusCode: http.StatusBadRequest, Body: `{"error":{"code":"BadRequest","message":"'where' operator: Failed to resolve column or scalar expression named 'Timestamp'. Fix semantic errors in your query."}}`}
 	laMissing := &logAnalyticsQueryError{StatusCode: http.StatusBadRequest, Body: `{"error":{"message":"The request had some invalid properties","code":"BadArgumentError","correlationId":"578c8e21-0000-0000-0000-000000000000","innererror":{"code":"SemanticError","message":"A semantic error occurred.","innererror":{"code":"SEM0100","message":"'where' operator: Failed to resolve table or column expression named 'DeviceProcessEvents'"}}}}`}
-	laColumn := &logAnalyticsQueryError{StatusCode: http.StatusBadRequest, Body: `{"error":{"code":"BadArgumentError","innererror":{"code":"SemanticError","innererror":{"code":"SEM0100","message":"'where' operator: Failed to resolve scalar expression named 'Timestamp'"}}}}`}
+	laColumn := &logAnalyticsQueryError{StatusCode: http.StatusBadRequest, Body: `{"error":{"code":"BadArgumentError","innererror":{"code":"SemanticError","innererror":{"code":"SEM0100","message":"'where' operator: Failed to resolve column or scalar expression named 'Timestamp'"}}}}`}
 	cases := []struct {
 		name   string
 		source querySource

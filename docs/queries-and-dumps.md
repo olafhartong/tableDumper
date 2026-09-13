@@ -21,7 +21,7 @@ Selects the service that queries and table dumps run against. Default: `defender
   --output signinlogs.json
 ```
 
-Both sources share the same pipeline: counting, hash partitioning, pseudonymization, ADX export and upload, OpenGraph export, and the `Schema`/`Results` output envelope. Log Analytics returns rows as arrays; they are converted to objects keyed by column name. Column types keep their lowercase Kusto names (`string`, `datetime`, `long`, `dynamic`, and so on), which the partition key and ADX schema treat the same as Defender's type names. `dynamic` values arrive as JSON text; objects and arrays are decoded so they are written and ingested as nested values.
+Both sources share the same pipeline: counting, hash partitioning, pseudonymization, ADX export and upload, OpenGraph export, and the `Schema`/`Results` output envelope. Log Analytics returns rows as arrays; they are converted to objects keyed by column name. Column types keep their lowercase Kusto names (`string`, `datetime`, `long`, `dynamic`, and so on), which the partition key and ADX schema treat the same as Defender's type names. `dynamic` values arrive as JSON text; objects and arrays are decoded so they are written and ingested as nested values. Dynamic scalars arrive as their raw text (`dynamic("text")` as `text`, `dynamic(5)` as `5`) and are kept as strings.
 
 `--source loganalytics` requires `--workspace-id` (see [Log Analytics authentication and networking](authentication-and-networking.md#--workspace-id)). Differences from the Defender source:
 
@@ -31,7 +31,7 @@ Both sources share the same pipeline: counting, hash partitioning, pseudonymizat
 - The service can answer HTTP 200 with a partial result and an `error` object when a limit is reached. Such a response is never used. A result-size error triggers the same automatic hash-partition retry as Defender's result-size error, for queries and table dumps; any other partial result fails the collection.
 - HTTP 429 responses are retried with the same waiting behavior as Defender.
 
-The query API returns at most 500,000 records and about 100 MB per response. Keep `--dump-row-limit` well below the record limit, and lower it for wide tables so each chunk stays under the size limit. A chunk that still exceeds the size limit is retried with more hash partitions; a single row that exceeds it fails the collection.
+The query API returns at most 500,000 records and 64 MB per response. Keep `--dump-row-limit` well below the record limit, and lower it for wide tables so each chunk stays under the size limit. A chunk that still exceeds the size limit is retried with more hash partitions; a single row that exceeds it fails the collection.
 
 Tables with restricted table-level access can return no rows rather than an error, so an empty result is not proof that the table is empty. Check the workspace permissions described in [Log Analytics authentication](authentication-and-networking.md#--workspace-id).
 
