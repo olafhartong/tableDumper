@@ -21,17 +21,18 @@ Selects the service that queries and table dumps run against. Default: `defender
   --output signinlogs.json
 ```
 
-Both sources share the same pipeline: counting, hash partitioning, pseudonymization, ADX export and upload, OpenGraph export, and the `Schema`/`Results` output envelope. Log Analytics returns rows as arrays; they are converted to objects keyed by column name. Column types keep their lowercase Kusto names (`string`, `datetime`, `long`, `dynamic`, and so on), which the partition key and ADX schema treat the same as Defender's type names. `dynamic` values arrive as JSON text; objects and arrays are decoded so they are written and ingested as nested values.
+Both sources share the same pipeline: counting, hash partitioning, pseudonymization, ADX export and upload, OpenGraph export, and the `Schema`/`Results` output envelope. Log Analytics returns rows as arrays; they are converted to objects keyed by column name. Column types keep their lowercase Kusto names (`string`, `datetime`, `long`, `dynamic`, and so on), which the partition key and ADX schema treat the same as Defender's type names. `dynamic` values arrive as JSON text; objects and arrays are decoded so they are written and ingested as nested values. Dynamic scalars arrive as their raw text (`dynamic("text")` as `text`, `dynamic(5)` as `5`) and are kept as strings.
 
 `--source loganalytics` requires `--workspace-id` (see [Log Analytics authentication and networking](authentication-and-networking.md#--workspace-id)). Differences from the Defender source:
 
 - `--dump-time-column` defaults to `TimeGenerated`.
 - A table dump filtering on `TimeGenerated` also sends the fixed dump window, padded by one second, as the request `timespan`. The query's own filter remains authoritative. With another `--dump-time-column`, no `timespan` is sent, because the service applies it to `TimeGenerated` and could exclude rows the query selects. Free-form queries never send a `timespan`; the query text alone defines the time range.
+- Table dumps exclude rows ingested after the cutoff, as for Defender (see [`--dump-lookback`](#--dump-lookback)). Some Log Analytics tables, such as Entra ID audit logs, can receive events many hours after their `TimeGenerated`, so choose an older window when recent data must be complete.
 - Requests ask the service for up to ten minutes (`Prefer: wait=600`). The shared `--timeout` still applies, so raise it for long-running queries.
-- The service can answer HTTP 200 with a partial result and an `error` object when a limit is reached. Such a response is never used. A result-size error triggers the same automatic hash-partition retry as Defender's result-size error for free-form queries; any other partial result fails the collection.
+- The service can answer HTTP 200 with a partial result and an `error` object when a limit is reached. Such a response is never used. A result-size error triggers the same automatic hash-partition retry as Defender's result-size error, for queries and table dumps; any other partial result fails the collection.
 - HTTP 429 responses are retried with the same waiting behavior as Defender.
 
-The query API returns at most 500,000 records and about 100 MB per response. Keep `--dump-row-limit` well below the record limit, and lower it for wide tables so each chunk stays under the size limit. A table dump chunk that still exceeds the size limit fails explicitly instead of being retried.
+The query API returns at most 500,000 records and 64 MB per response. Keep `--dump-row-limit` well below the record limit, and lower it for wide tables so each chunk stays under the size limit. A chunk that still exceeds the size limit is retried with more hash partitions; a single row that exceeds it fails the collection.
 
 Tables with restricted table-level access can return no rows rather than an error, so an empty result is not proof that the table is empty. Check the workspace permissions described in [Log Analytics authentication](authentication-and-networking.md#--workspace-id).
 
@@ -84,7 +85,7 @@ Partition counts must be unique, in range, and add up to the initial count. Ever
 
 A result containing only dynamic/unknown columns fails safely when partitioning is needed. Project a stable scalar event identifier from the dynamic data in the original query. If too many rows have identical scalar keys, increasing the partition count cannot separate them; attempts are bounded and the collection returns an error. Small results can still be downloaded without a partition key.
 
-Free-form query mode reuses the supplied pipeline without rewriting its expressions. Use explicit absolute time bounds and immutable source values when completeness matters. Avoid `rand()`, unordered `take`, changing aggregations, and strings derived from unordered dynamic bags in a partitioned query. Late-arriving records or updates can change membership even within a fixed table time window; this API does not provide a cross-request snapshot.
+Free-form query mode reuses the supplied pipeline without rewriting its expressions. Use explicit absolute time bounds and immutable source values when completeness matters. Avoid `rand()`, unordered `take`, changing aggregations, and strings derived from unordered dynamic bags in a partitioned query. Late-arriving records or updates can change membership even within a fixed time window; this API does not provide a cross-request snapshot. Table dumps add an ingestion-time cutoff for that reason; add `| where ingestion_time() < datetime(...)` to a free-form query to get the same effect.
 
 The partition contract follows Microsoft's documentation for [unordered `pack_all()` objects](https://learn.microsoft.com/en-us/kusto/query/pack-all-function?view=microsoft-fabric), [ordered arrays](https://learn.microsoft.com/en-us/kusto/query/pack-array-function?view=microsoft-fabric), and [stable SHA-256 hashing](https://learn.microsoft.com/en-us/kusto/query/hash-sha256-function?view=microsoft-fabric).
 
@@ -100,7 +101,7 @@ Accepted values are simple KQL timespan literals such as:
 - `1.5h`
 - `30s`
 
-The collection captures one UTC cutoff before counting. Every table request uses the same half-open window: `Timestamp >= (datetime(cutoff) - lookback) and Timestamp < datetime(cutoff)` (with the configured time column). Complex KQL expressions are rejected; use `--query` or `--query-file` when the selection needs a more involved time condition.
+The collection captures one UTC cutoff before counting. Every table request uses the same half-open window: `Timestamp >= (datetime(cutoff) - lookback) and Timestamp < datetime(cutoff)` (with the configured time column). Every request also excludes rows ingested at or after the cutoff with `isnull(ingestion_time()) or ingestion_time() < datetime(cutoff)`, so events that arrive during the collection cannot change counts between requests. Events can be ingested hours after their event time, so a window that ends near the present misses events that have not arrived yet; use an older window when the most recent hours must be complete. Complex KQL expressions are rejected; use `--query` or `--query-file` when the selection needs a more involved time condition.
 
 This flag has no effect unless `--dump-table` is set.
 
@@ -125,7 +126,7 @@ Controls the maximum target size of each query or table-dump request. Default: `
 - If the count is equal to or above the limit, the tool counts hash partitions.
 - If any partition is still at or above the limit, the partition count is doubled and checked again.
 - Non-empty partitions are then downloaded sequentially and streamed into the output.
-- If the source reports that even a below-threshold query result or partition exceeds its byte-size limit, the tool retries with more hash partitions automatically.
+- If the source reports that even a below-threshold query, table dump, or partition exceeds its byte-size limit, the tool retries with more hash partitions automatically. A single row above that limit fails the collection.
 
 This is a query-size and memory-control setting, not a cap on the total number of rows written. Lower values create more requests; higher values create larger responses.
 

@@ -86,7 +86,7 @@ func TestParseLogAnalyticsResponseNormalizesArrayRows(t *testing.T) {
 		`{"name":"ConditionalAccessPolicies","type":"dynamic"},{"name":"Latency","type":"timespan"},{"name":"RiskScore","type":"decimal"},` +
 		`{"name":"ResultDescription","type":"string"}],"rows":[` +
 		`["2026-09-01T10:15:00.1234567Z","j.doe@contoso.com","74be27de-1e4e-49d9-b579-fe0b331d3642",1234,true,"{\"city\":\"Utrecht\",\"geoCoordinates\":{\"latitude\":52.09}}","[]","00:00:10","0.10101",null],` +
-		`["2026-09-01T10:16:00.9Z","bob.vance@fabrikam.com","0b3a5e2f-8c1d-4f6a-9e7b-2c4d6e8f0a1b",0,false,"\"plain dynamic string\"","[{\"id\":\"policy\"}]","00:00:00.5","1",""]]}]}`
+		`["2026-09-01T10:16:00.9Z","bob.vance@fabrikam.com","0b3a5e2f-8c1d-4f6a-9e7b-2c4d6e8f0a1b",0,false,"plain dynamic string","[{\"id\":\"policy\"}]","00:00:00.5","1",""]]}]}`
 	response, err := parseLogAnalyticsResponse([]byte(body))
 	if err != nil {
 		t.Fatal(err)
@@ -108,8 +108,17 @@ func TestParseLogAnalyticsResponseNormalizesArrayRows(t *testing.T) {
 	if policies, ok := first["ConditionalAccessPolicies"].([]any); !ok || len(policies) != 0 {
 		t.Fatalf("dynamic array was not decoded: %#v", first["ConditionalAccessPolicies"])
 	}
-	if second := response.Results[1]; second["LocationDetails"] != `"plain dynamic string"` || second["ResultDescription"] != "" {
+	// The service sends dynamic scalars as their raw text: dynamic("text") is
+	// "text" and dynamic(5) is "5". They are kept as strings.
+	if second := response.Results[1]; second["LocationDetails"] != "plain dynamic string" || second["ResultDescription"] != "" {
 		t.Fatalf("non-container dynamic or empty string changed: %#v", second)
+	}
+	scalars, err := parseLogAnalyticsResponse([]byte(`{"tables":[{"name":"PrimaryResult","columns":[{"name":"Value","type":"dynamic"}],"rows":[["5"],[null]]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scalars.Results[0]["Value"] != "5" || scalars.Results[1]["Value"] != nil {
+		t.Fatalf("dynamic scalar or null changed: %#v", scalars.Results)
 	}
 
 	// The same columns under Defender's type spelling must produce the same
@@ -193,6 +202,9 @@ func TestLogAnalyticsTableDumpCountsThenPartitionsThroughRun(t *testing.T) {
 		match := windowPattern.FindStringSubmatch(request.Query)
 		if match == nil || match[1] != match[2] {
 			t.Fatalf("query does not filter the fixed TimeGenerated window: %q", request.Query)
+		}
+		if !strings.Contains(request.Query, "\n| where isnull(ingestion_time()) or ingestion_time() < datetime("+match[2]+")") {
+			t.Fatalf("query is not bounded by the ingestion-time cutoff: %q", request.Query)
 		}
 		if timespan == "" {
 			timespan = request.Timespan
@@ -360,9 +372,9 @@ func TestQuerySourcesRecognizeMissingTables(t *testing.T) {
 	defender := newDefenderQuerySource(nil, "", "")
 	la := &logAnalyticsSource{}
 	defenderMissing := &advancedQueryError{StatusCode: http.StatusBadRequest, Body: `{"error":{"code":"BadRequest","message":"'where' operator: Failed to resolve table or column expression named 'SigninLogs'. Fix semantic errors in your query.","innerError":{"date":"2026-09-13T10:00:00","request-id":"2a1e0b6c-0000-0000-0000-000000000000"}}}`}
-	defenderColumn := &advancedQueryError{StatusCode: http.StatusBadRequest, Body: `{"error":{"code":"BadRequest","message":"'where' operator: Failed to resolve scalar expression named 'Timestamp'. Fix semantic errors in your query."}}`}
+	defenderColumn := &advancedQueryError{StatusCode: http.StatusBadRequest, Body: `{"error":{"code":"BadRequest","message":"'where' operator: Failed to resolve column or scalar expression named 'Timestamp'. Fix semantic errors in your query."}}`}
 	laMissing := &logAnalyticsQueryError{StatusCode: http.StatusBadRequest, Body: `{"error":{"message":"The request had some invalid properties","code":"BadArgumentError","correlationId":"578c8e21-0000-0000-0000-000000000000","innererror":{"code":"SemanticError","message":"A semantic error occurred.","innererror":{"code":"SEM0100","message":"'where' operator: Failed to resolve table or column expression named 'DeviceProcessEvents'"}}}}`}
-	laColumn := &logAnalyticsQueryError{StatusCode: http.StatusBadRequest, Body: `{"error":{"code":"BadArgumentError","innererror":{"code":"SemanticError","innererror":{"code":"SEM0100","message":"'where' operator: Failed to resolve scalar expression named 'Timestamp'"}}}}`}
+	laColumn := &logAnalyticsQueryError{StatusCode: http.StatusBadRequest, Body: `{"error":{"code":"BadArgumentError","innererror":{"code":"SemanticError","innererror":{"code":"SEM0100","message":"'where' operator: Failed to resolve column or scalar expression named 'Timestamp'"}}}}`}
 	cases := []struct {
 		name   string
 		source querySource
@@ -463,5 +475,78 @@ func TestKQLTimespanDuration(t *testing.T) {
 		if _, err := kqlTimespanDuration(literal); err == nil {
 			t.Errorf("kqlTimespanDuration(%q) accepted an invalid literal", literal)
 		}
+	}
+}
+
+func TestLogAnalyticsTableDumpRetriesPartitionThatExceedsByteLimit(t *testing.T) {
+	payload := [][2]string{{"TimeGenerated", "datetime"}, {"Payload", "string"}}
+	row := func(i int) []any { return []any{fmt.Sprintf("2026-09-01T10:%02d:00Z", i), fmt.Sprintf("event-%d", i)} }
+	server, _ := newLogAnalyticsTestServer(t, func(w http.ResponseWriter, request logAnalyticsTestRequest) {
+		switch query := request.Query; {
+		case strings.HasSuffix(query, "\n| count"):
+			io.WriteString(w, logAnalyticsTableBody(t, [][2]string{{"Count", "long"}}, []any{4}))
+		case strings.HasSuffix(query, "\n| take 0"):
+			io.WriteString(w, logAnalyticsTableBody(t, payload))
+		case strings.HasSuffix(query, "% 2)"):
+			io.WriteString(w, logAnalyticsTableBody(t, [][2]string{{"DumpPartition", "long"}, {"Count", "long"}}, []any{0, 2}, []any{1, 2}))
+		case strings.HasSuffix(query, "% 2) == 0"):
+			io.WriteString(w, logAnalyticsPartialSizeBody)
+		case strings.HasSuffix(query, "% 4)"):
+			io.WriteString(w, logAnalyticsTableBody(t, [][2]string{{"DumpPartition", "long"}, {"Count", "long"}}, []any{0, 1}, []any{1, 1}, []any{2, 1}, []any{3, 1}))
+		case strings.Contains(query, "% 4) == "):
+			partition := int(query[len(query)-1] - '0')
+			io.WriteString(w, logAnalyticsTableBody(t, payload, row(partition)))
+		default:
+			t.Errorf("unexpected query %q", query)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	})
+	source := &logAnalyticsSource{httpClient: server.Client(), endpoint: server.URL + "/v1", workspaceID: testWorkspaceID}
+	cfg := config{Source: sourceLogAnalytics, DumpTable: "AADNonInteractiveUserSignInLogs", DumpLookback: "1d", DumpTimeColumn: "TimeGenerated", DumpRowLimit: 4, Output: filepath.Join(t.TempDir(), "signins.json")}
+	var progress bytes.Buffer
+	output, err := dumpTable(context.Background(), source, cfg, nil, &progress)
+	if err != nil {
+		t.Fatalf("dumpTable returned error: %v\n%s", err, progress.String())
+	}
+	if output.Rows != 4 || output.Stats.Chunks != 4 || output.Stats.Partitions != 4 {
+		t.Fatalf("unexpected output %#v", output)
+	}
+	if !strings.Contains(progress.String(), "retrying with at least 4 hash partitions") {
+		t.Fatalf("partition retry was not reported:\n%s", progress.String())
+	}
+	body, err := os.ReadFile(cfg.Output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var written queryResponse
+	if err := json.Unmarshal(body, &written); err != nil || len(written.Results) != 4 {
+		t.Fatalf("unexpected output file: %v\n%s", err, body)
+	}
+}
+
+func TestLogAnalyticsTableDumpFailsWhenOneRowExceedsByteLimit(t *testing.T) {
+	server, requests := newLogAnalyticsTestServer(t, func(w http.ResponseWriter, request logAnalyticsTestRequest) {
+		switch query := request.Query; {
+		case strings.HasSuffix(query, "\n| count"):
+			io.WriteString(w, logAnalyticsTableBody(t, [][2]string{{"Count", "long"}}, []any{2}))
+		case strings.HasSuffix(query, "\n| take 0"):
+			io.WriteString(w, logAnalyticsTableBody(t, [][2]string{{"Payload", "string"}}))
+		case strings.HasSuffix(query, "% 2)"):
+			io.WriteString(w, logAnalyticsTableBody(t, [][2]string{{"DumpPartition", "long"}, {"Count", "long"}}, []any{0, 1}, []any{1, 1}))
+		default:
+			io.WriteString(w, logAnalyticsPartialSizeBody)
+		}
+	})
+	source := &logAnalyticsSource{httpClient: server.Client(), endpoint: server.URL + "/v1", workspaceID: testWorkspaceID}
+	cfg := config{Source: sourceLogAnalytics, DumpTable: "AppTraces", DumpLookback: "1d", DumpTimeColumn: "TimeGenerated", DumpRowLimit: 10, Output: filepath.Join(t.TempDir(), "traces.json")}
+	_, err := dumpTable(context.Background(), source, cfg, nil, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "individual row that exceeds the service result-size limit") {
+		t.Fatalf("expected an individual row size error, got %v", err)
+	}
+	if len(*requests) != 5 {
+		t.Fatalf("expected count, single query, schema, partition count, and one partition download; got %d requests", len(*requests))
+	}
+	if _, statErr := os.Stat(cfg.Output); !os.IsNotExist(statErr) {
+		t.Fatal("incomplete result was written to the output file")
 	}
 }

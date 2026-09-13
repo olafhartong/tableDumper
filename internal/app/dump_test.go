@@ -19,16 +19,16 @@ import (
 
 func TestBuildTableDumpQueries(t *testing.T) {
 	base := buildTableDumpBaseQuery("DeviceEvents", "Timestamp", "30d", time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC))
-	if base != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)" {
+	if base != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(2026-09-09T12:00:00Z)" {
 		t.Fatalf("unexpected base query %q", base)
 	}
-	if got := buildTableDumpCountQuery(base); got != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| count" {
+	if got := buildTableDumpCountQuery(base); got != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(2026-09-09T12:00:00Z)\n| count" {
 		t.Fatalf("unexpected count query %q", got)
 	}
-	if got := buildTableDumpPartitionCountQuery(base, `tostring(pack_array(tostring(["EventId"])))`, 4); got != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| summarize Count=count() by DumpPartition=(tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 4)" {
+	if got := buildTableDumpPartitionCountQuery(base, `tostring(pack_array(tostring(["EventId"])))`, 4); got != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(2026-09-09T12:00:00Z)\n| summarize Count=count() by DumpPartition=(tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 4)" {
 		t.Fatalf("unexpected partition count query %q", got)
 	}
-	if got := buildTableDumpPartitionQuery(base, `tostring(pack_array(tostring(["EventId"])))`, 4, 2); got != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 4) == 2" {
+	if got := buildTableDumpPartitionQuery(base, `tostring(pack_array(tostring(["EventId"])))`, 4, 2); got != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(2026-09-09T12:00:00Z)\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 4) == 2" {
 		t.Fatalf("unexpected partition query %q", got)
 	}
 }
@@ -36,7 +36,7 @@ func TestBuildTableDumpQueries(t *testing.T) {
 func TestTableDumpCutoffUsesUTCAndSupportedPrecision(t *testing.T) {
 	cutoff := time.Date(2026, 9, 9, 14, 0, 0, 123456789, time.FixedZone("test", 2*60*60))
 	query := buildTableDumpBaseQuery("Events", "Timestamp", "1h", cutoff)
-	if strings.Count(query, "datetime(2026-09-09T12:00:00.123456Z)") != 2 || strings.Contains(query, "ago(") {
+	if strings.Count(query, "datetime(2026-09-09T12:00:00.123456Z)") != 3 || strings.Contains(query, "ago(") {
 		t.Fatalf("window is not fixed at a supported UTC precision: %s", query)
 	}
 }
@@ -185,6 +185,9 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 		if strings.Contains(query, "ago(") {
 			t.Error("table window is not frozen")
 		}
+		if !strings.Contains(query, "\n| where isnull(ingestion_time()) or ingestion_time() < datetime(") {
+			t.Errorf("table dump request has no ingestion-time cutoff: %q", query)
+		}
 		w.Header().Set("Content-Type", "application/json")
 
 		switch {
@@ -286,6 +289,65 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 	} {
 		if !strings.Contains(progressText, want) {
 			t.Fatalf("expected progress to contain %q, got:\n%s", want, progressText)
+		}
+	}
+}
+
+func TestDumpTableFallsBackWhenSingleQueryExceedsByteLimit(t *testing.T) {
+	var baseQuery string
+	attemptedSingleQuery := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := readAdvancedQueryRequest(t, r)
+		if baseQuery == "" {
+			baseQuery = strings.TrimSuffix(query, "\n| count")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch query {
+		case baseQuery + "\n| count":
+			io.WriteString(w, `{"Results":[{"Count":2}]}`)
+		case baseQuery:
+			attemptedSingleQuery = true
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"error":{"code":"BadRequest","message":"Query execution has exceeded the allowed result size. Optimize your query by limiting the amount of results and try again."}}`)
+		case baseQuery + "\n| take 0":
+			io.WriteString(w, `{"Schema":[{"Name":"ReportId","Type":"Int64"}],"Results":[]}`)
+		case baseQuery + "\n| summarize Count=count() by DumpPartition=(tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"ReportId\"])))), 0, 15))) % 2)":
+			io.WriteString(w, `{"Results":[{"DumpPartition":0,"Count":1},{"DumpPartition":1,"Count":1}]}`)
+		case baseQuery + "\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"ReportId\"])))), 0, 15))) % 2) == 0":
+			io.WriteString(w, `{"Schema":[{"Name":"ReportId","Type":"Int64"}],"Results":[{"ReportId":1}]}`)
+		case baseQuery + "\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"ReportId\"])))), 0, 15))) % 2) == 1":
+			io.WriteString(w, `{"Schema":[{"Name":"ReportId","Type":"Int64"}],"Results":[{"ReportId":2}]}`)
+		default:
+			t.Fatalf("unexpected query %q", query)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config{
+		DumpTable:      "DeviceProcessEvents",
+		DumpLookback:   "12h",
+		DumpTimeColumn: "Timestamp",
+		DumpRowLimit:   defaultDumpRowLimit,
+		Output:         filepath.Join(t.TempDir(), "processes.json"),
+	}
+	var progress bytes.Buffer
+	output, err := dumpTable(context.Background(), newDefenderQuerySource(server.Client(), server.URL, "token-value"), cfg, nil, &progress)
+	if err != nil {
+		t.Fatalf("dumpTable returned error: %v", err)
+	}
+	if !attemptedSingleQuery {
+		t.Fatal("single-query dump was not attempted")
+	}
+	if output.Rows != 2 || output.Stats.TotalRows != 2 || output.Stats.Chunks != 2 || output.Stats.Partitions != 2 {
+		t.Fatalf("unexpected output %#v", output)
+	}
+	for _, want := range []string{
+		"single-query dump exceeded the service result-size limit",
+		"counting rows across 2 hash partition(s)",
+		"completed partitioned dump with 2 row(s)",
+	} {
+		if !strings.Contains(progress.String(), want) {
+			t.Fatalf("expected progress to contain %q, got:\n%s", want, progress.String())
 		}
 	}
 }
