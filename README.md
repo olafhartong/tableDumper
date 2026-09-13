@@ -9,6 +9,7 @@ Small Go CLI to:
 - generate a BloodHound OpenGraph JSON payload from graph-shaped Defender results
 - upload a JSON file into an Azure Data Explorer table in configurable batches
 - pseudonymize collected identifiers with an embedded NER model before any result is written
+- record a machine-readable manifest of which tables a collection captured, found empty, failed to collect, or found missing
 
 ## What it does
 
@@ -101,7 +102,19 @@ Detailed documentation for every command-line flag is available in [docs/README.
 
 `--source loganalytics` uses the Log Analytics query API with the same credentials, a `TimeGenerated` default time column, and the same partitioning, pseudonymization, and ADX export. The identity needs the Log Analytics Reader role on the workspace. See [query sources](docs/queries-and-dumps.md#--source).
 
-### 7. Pseudonymize a collection
+### 7. Record a collection manifest
+
+```bash
+./tableDumper --auth azcli --dump-table DeviceProcessEvents \
+  --output incident/device-process-events.json --manifest incident/manifest.json
+
+./tableDumper --auth azcli --query-file incident.kql \
+  --output incident/alerts.json --manifest incident/manifest.json --manifest-table IncidentAlerts
+```
+
+Each run adds or replaces one table entry with status `captured`, `captured_empty`, `not_captured`, or `absent_in_source`, plus its columns, row count, window, and file hashes. With `--pseudonymize`, the manifest records the vault `key_id` and no original values. See [the manifest guide](docs/queries-and-dumps.md#--manifest).
+
+### 8. Pseudonymize a collection
 
 ```bash
 ./tableDumper \
@@ -490,6 +503,13 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 `--output`
 - Path for the query JSON response
 - Default: `results.json`
+
+`--manifest`
+- Collection manifest JSON file to create or update with this run's table status, columns, counts, and file hashes
+
+`--manifest-table`
+- Table name recorded in `--manifest` for query results
+- Required with `--manifest` and `--query`/`--query-file`
 
 `--pseudonymize`
 - Apply embedded NER and identifier pseudonymization before collected data is written

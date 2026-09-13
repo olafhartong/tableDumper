@@ -37,7 +37,11 @@ type partitionCount struct {
 }
 
 func dumpTable(ctx context.Context, source querySource, cfg config, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
-	cutoff := time.Now().UTC()
+	return dumpTableAt(ctx, source, cfg, time.Now().UTC(), pseudonyms, progress)
+}
+
+// dumpTableAt dumps the lookback window ending at cutoff.
+func dumpTableAt(ctx context.Context, source querySource, cfg config, cutoff time.Time, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
 	baseQuery := buildTableDumpBaseQuery(cfg.DumpTable, cfg.DumpTimeColumn, cfg.DumpLookback, cutoff)
 	source, err := withTableDumpTimespan(source, cfg, cutoff, progress)
 	if err != nil {
@@ -61,6 +65,9 @@ func dumpTable(ctx context.Context, source querySource, cfg config, pseudonyms *
 		response, err := source.RunQuery(ctx, baseQuery, progress)
 		if err != nil {
 			return tableDumpOutput{Stats: stats}, fmt.Errorf("dump %s: %w", cfg.DumpTable, err)
+		}
+		if response, err = withEmptyResultSchema(ctx, source, baseQuery, response, progress); err != nil {
+			return tableDumpOutput{Stats: stats}, err
 		}
 		if pseudonyms != nil {
 			response, err = pseudonyms.PseudonymizeResponse(ctx, response)
@@ -115,10 +122,7 @@ func dumpTable(ctx context.Context, source querySource, cfg config, pseudonyms *
 		stats.Chunks = 0
 		stats.Partitions = 0
 		progressf(progress, "[-] no non-empty partitions found")
-		if err := writeJSONFile(cfg.Output, []byte(`{"Schema":[],"Results":[]}`)); err != nil {
-			return tableDumpOutput{Stats: stats}, err
-		}
-		return tableDumpOutput{Stats: stats}, nil
+		return writeEmptyPartitionedResult(cfg, key, stats)
 	}
 
 	schema, rows, adxDataPath, adxSchemaPath, err := streamTableDumpPartitions(ctx, source, cfg, baseQuery, key, partitions, partitionCountValue, pseudonyms, progress)
@@ -135,6 +139,35 @@ func dumpTable(ctx context.Context, source querySource, cfg config, pseudonyms *
 		ADXDataPath:   adxDataPath,
 		ADXSchemaPath: adxSchemaPath,
 	}, nil
+}
+
+// withEmptyResultSchema resolves the columns of an empty result when the
+// service omitted them, so an empty table still records its schema.
+func withEmptyResultSchema(ctx context.Context, source querySource, baseQuery string, response queryResponse, progress io.Writer) (queryResponse, error) {
+	if len(response.Results) > 0 || len(response.Schema) > 0 {
+		return response, nil
+	}
+	schemaResponse, err := source.RunQuery(ctx, baseQuery+"\n| take 0", progress)
+	if err != nil {
+		return response, fmt.Errorf("resolve empty result schema: %w", err)
+	}
+	response.Schema = schemaResponse.Schema
+	response.Results = []map[string]any{}
+	return response, nil
+}
+
+// writeEmptyPartitionedResult publishes an empty partitioned result with the
+// schema resolved for its partition key.
+func writeEmptyPartitionedResult(cfg config, key queryPartitionKey, stats tableDumpStats) (tableDumpOutput, error) {
+	response := queryResponse{Schema: key.schema, Results: []map[string]any{}}
+	body, err := marshalQueryResponse(response)
+	if err != nil {
+		return tableDumpOutput{Stats: stats}, err
+	}
+	if err := writeJSONFile(cfg.Output, body); err != nil {
+		return tableDumpOutput{Stats: stats}, err
+	}
+	return tableDumpOutput{Schema: response.Schema, Stats: stats, Response: response}, nil
 }
 
 // withTableDumpTimespan gives sources with a service-side time range one that

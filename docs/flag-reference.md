@@ -20,6 +20,8 @@ This page lists every flag registered by the application. Follow the guide link 
 | `--dump-row-limit` | positive integer | `30000` | Set the query and table-dump threshold that triggers hash partitioning. | [Queries and dumps](queries-and-dumps.md#--dump-row-limit) |
 | `--dump-parallelism` | positive integer | `1` | Deprecated compatibility option; requests remain sequential. | [Table dumps](queries-and-dumps.md#--dump-parallelism) |
 | `--output` | path | `results.json` | Set the main Defender query or dump output path. | [Output](queries-and-dumps.md#--output) |
+| `--manifest` | path | empty | Create or update a collection manifest recording what each query or table dump captured. | [Manifest](queries-and-dumps.md#--manifest) |
+| `--manifest-table` | identifier | empty; required for query input with `--manifest` | Name recorded in the manifest for a query result. | [Manifest](queries-and-dumps.md#--manifest-table) |
 | `--adx-export` | boolean | `false` | Generate ADX NDJSON and KQL sidecars for collected results. | [ADX export](azure-data-explorer.md#--adx-export) |
 | `--opengraph-export` | boolean | `false` | Generate BloodHound OpenGraph and icon sidecars. | [OpenGraph](bloodhound-and-opengraph.md#--opengraph-export) |
 | `--adx-cluster` | URI | `ADX_CLUSTER` | ADX engine cluster used for direct upload. | [ADX upload](azure-data-explorer.md#--adx-cluster) |

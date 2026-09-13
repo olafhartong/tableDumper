@@ -15,6 +15,8 @@ import (
 type queryPartitionKey struct {
 	expression string
 	columns    []queryColumn
+	// schema is the complete result schema, kept for empty results.
+	schema []queryColumn
 }
 
 func resolvePartitionKey(ctx context.Context, source querySource, baseQuery string, progress io.Writer) (queryPartitionKey, error) {
@@ -32,7 +34,7 @@ func resolvePartitionKey(ctx context.Context, source querySource, baseQuery stri
 }
 
 func newQueryPartitionKey(schema []queryColumn) (queryPartitionKey, error) {
-	key := queryPartitionKey{}
+	key := queryPartitionKey{schema: schema}
 	seen := make(map[string]bool)
 	for _, column := range schema {
 		if column.Name == "" || seen[column.Name] {

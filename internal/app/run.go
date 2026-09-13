@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -71,20 +72,33 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		}
 	}
 
+	var manifest *manifestRun
+	if cfg.Manifest != "" {
+		if manifest, err = openManifestRun(cfg.Manifest, pseudonyms); err != nil {
+			return err
+		}
+	}
+
 	if hasQueryInput(cfg) {
 		query, err := readQuery(cfg.Query, cfg.QueryFile)
 		if err != nil {
 			return err
 		}
+		record := manifestResult{sourceName: cfg.Source, table: cfg.ManifestTable, query: query, outputPath: cfg.Output}
 
 		source, authMode, err := newQuerySource(ctx, httpClient, cfg)
 		if err != nil {
-			return err
+			record.err = err
+			return manifest.Record(record)
 		}
 
 		output, err := dumpQuery(ctx, source, cfg, query, pseudonyms, stderr)
-		if err != nil {
+		record.source, record.output, record.err = source, output, err
+		if err := manifest.Record(record); err != nil {
 			return err
+		}
+		if manifest != nil {
+			fmt.Fprintf(stderr, "[i] recorded %s in manifest %s\n", cfg.ManifestTable, cfg.Manifest)
 		}
 
 		message := fmt.Sprintf("[=] Done. Wrote %d rows to %s using %s authentication", output.Rows, cfg.Output, authMode)
@@ -123,14 +137,21 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 
 	if cfg.DumpTable != "" {
+		cutoff := time.Now().UTC()
+		record := manifestResult{sourceName: cfg.Source, table: cfg.DumpTable, timeColumn: cfg.DumpTimeColumn, lookback: cfg.DumpLookback, cutoff: cutoff, outputPath: cfg.Output}
 		source, authMode, err := newQuerySource(ctx, httpClient, cfg)
 		if err != nil {
-			return err
+			record.err = err
+			return manifest.Record(record)
 		}
 
-		output, err := dumpTable(ctx, source, cfg, pseudonyms, stderr)
-		if err != nil {
+		output, err := dumpTableAt(ctx, source, cfg, cutoff, pseudonyms, stderr)
+		record.source, record.output, record.err = source, output, err
+		if err := manifest.Record(record); err != nil {
 			return err
+		}
+		if manifest != nil {
+			fmt.Fprintf(stderr, "[i] recorded %s in manifest %s\n", cfg.DumpTable, cfg.Manifest)
 		}
 
 		message := fmt.Sprintf("[=] Done! Dumped %d rows from %s over %s to %s using %s authentication", output.Rows, cfg.DumpTable, cfg.DumpLookback, cfg.Output, authMode)

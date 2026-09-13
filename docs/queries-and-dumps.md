@@ -157,7 +157,91 @@ The output basename also determines optional sidecar names:
 | `--adx-export` | `results.adx.json`, `results.adx.kql` |
 | `--opengraph-export` | `results.opengraph.json`, usually `results.opengraph.icons.json` |
 
-A pseudonym mapping or replacements file may not use the same path as the main output or these enabled sidecars.
+A pseudonym mapping file, replacements file, or `--manifest` may not use the same path as the main output or these enabled sidecars.
+
+## `--manifest`
+
+Creates or updates a JSON collection manifest describing what the run captured. Each `--dump-table`, `--query`, or `--query-file` run records one table entry, so a set of runs sharing one manifest describes a whole collection. Default: disabled.
+
+```bash
+./tableDumper --dump-table DeviceProcessEvents --dump-lookback 7d \
+  --output incident/device-process-events.json --manifest incident/manifest.json
+
+./tableDumper --source loganalytics --workspace-id <workspace-id> \
+  --query-file queries/incident-signins.kql \
+  --output incident/signins.json \
+  --manifest incident/manifest.json --manifest-table IncidentSignins
+```
+
+Every table has one of four statuses. They are never collapsed, because a reader treats an empty result as evidence that nothing happened:
+
+| Status | Meaning |
+|---|---|
+| `captured` | Collected with at least one row. `row_count`, `partitions`, `columns`, `file`, `sha256`, and `bytes` are recorded. |
+| `captured_empty` | Collected successfully with zero rows. `columns` are still recorded, so an identical empty table can be created, together with the written file and its hash. |
+| `not_captured` | The run did not collect the table, for example because a query, pseudonymization, or write failed. `note` explains why. |
+| `absent_in_source` | The source reported that the table does not exist (a Kusto "failed to resolve table" semantic error naming that table). |
+
+Failed and absent tables still update the manifest before the run returns its error, and the run exits with an error exactly as it would without `--manifest`.
+
+Example:
+
+```json
+{
+  "schema_version": 1,
+  "tool": {"name": "tableDumper", "version": "57c7290a1b2c"},
+  "created_at": "2026-09-13T09:58:12.41Z",
+  "updated_at": "2026-09-13T10:02:47.03Z",
+  "pseudonymization": {"enabled": true, "mode": "irreversible", "key_id": "3f9c0a7d51e2b846"},
+  "tables": [
+    {
+      "source": "defender",
+      "name": "DeviceProcessEvents",
+      "status": "captured",
+      "time_column": "Timestamp",
+      "window": {"start": "2026-09-06T09:58:12.41Z", "end": "2026-09-13T09:58:12.41Z"},
+      "columns": [{"name": "Timestamp", "type": "datetime"}, {"name": "DeviceName", "type": "string"}],
+      "row_count": 48213,
+      "partitions": 4,
+      "file": "device-process-events.json",
+      "sha256": "9b1f…",
+      "bytes": 81234567,
+      "adx_data_file": "device-process-events.adx.json",
+      "adx_data_sha256": "c07e…"
+    },
+    {
+      "source": "loganalytics",
+      "name": "AADRiskyUsers",
+      "status": "absent_in_source",
+      "time_column": "TimeGenerated",
+      "window": {"start": "2026-09-06T10:02:40.12Z", "end": "2026-09-13T10:02:40.12Z"},
+      "note": "the table does not exist in the source"
+    }
+  ]
+}
+```
+
+Rules:
+
+- Entries are keyed by `source` and `name`. Re-running a table replaces its entry, including replacing a previous `captured` entry with `not_captured` when the new run fails. Tables are sorted by that key.
+- Column types use the Kusto names produced by the ADX export mapping (`string`, `datetime`, `long`, `int`, `real`, `bool`, `guid`, `decimal`, `dynamic`).
+- `file` and `adx_data_file` are relative to the manifest's directory, with forward slashes. Hashes are SHA-256 over the final published files.
+- Table dumps record `time_column` and the fixed half-open `window` used by the query. Query entries have no window.
+- The manifest is validated when it is loaded and before it is written, and saved atomically with owner-only `0600` permissions. An existing invalid manifest stops the run before any query is sent.
+- A tool `version` is the module version, or the VCS revision (with `-dirty` for modified trees) for local builds.
+- Runs are not locked against each other. Do not run collections that share a manifest concurrently.
+
+With `--pseudonymize`, the manifest contains no original values: no query text, no tenant or workspace ID, and failure notes record only the failure category because service errors can echo query text. It records the vault's mode and `key_id` (never the seed), so the manifest can be matched to its vault. Every run that joins a manifest must use the same pseudonymization setup; a run with pseudonymization disabled, a different vault, or a different vault mode is rejected before it collects anything. Without `--pseudonymize`, query entries record the query text and failure notes include the error. File paths are recorded as given, so do not put identifiers in output file names.
+
+An empty result cannot always prove a table is empty in the source: Log Analytics tables protected by table-level access can return no rows without an error.
+
+The manifest path must differ from `--output`, every enabled ADX/OpenGraph sidecar, `--pseudonym-map`, `--pseudonym-replacements-file`, and `--query-file`.
+
+## `--manifest-table`
+
+Sets the table name recorded in `--manifest` for a `--query` or `--query-file` result. It is required when `--manifest` is used with query input, and rejected with `--dump-table`, which records its own table name. The value must be a safe identifier: letters or underscore first, followed by letters, digits, or underscores.
+
+A query result is recorded as `absent_in_source` only when the source reports that a table with exactly this name does not exist. A missing table under a different name in the query is recorded as `not_captured`.
 
 ## Common combinations
 

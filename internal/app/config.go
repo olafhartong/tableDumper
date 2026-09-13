@@ -72,6 +72,8 @@ type config struct {
 	PseudonymFields           string
 	PseudonymReplacementsFile string
 	PseudonymMapRetention     string
+	Manifest                  string
+	ManifestTable             string
 	Endpoint                  string
 	Resource                  string
 	LoginBaseURL              string
@@ -106,6 +108,8 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	fs.IntVar(&cfg.DumpRowLimit, "dump-row-limit", defaultDumpRowLimit, "Maximum rows per advanced hunting query chunk before partitioning")
 	fs.IntVar(&cfg.DumpParallelism, "dump-parallelism", 1, "Deprecated compatibility flag; partition requests are always sequential")
 	fs.StringVar(&cfg.Output, "output", defaultOutputFile, "Path to the JSON output file")
+	fs.StringVar(&cfg.Manifest, "manifest", "", "Path to a collection manifest JSON file to create or update with what this run captured")
+	fs.StringVar(&cfg.ManifestTable, "manifest-table", "", "Table name recorded in -manifest for -query or -query-file results")
 	fs.BoolVar(&cfg.ADXExport, "adx-export", false, "Also write Azure Data Explorer ingestion artifacts")
 	fs.BoolVar(&cfg.OpenGraphExport, "opengraph-export", false, "Also write a BloodHound OpenGraph JSON payload")
 	fs.StringVar(&cfg.ADXCluster, "adx-cluster", envOrDotEnvAny(dotenv, "ADX_CLUSTER"), "ADX cluster URI, for example https://<cluster>.<region>.kusto.windows.net")
@@ -207,6 +211,8 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	cfg.PseudonymFields = strings.TrimSpace(cfg.PseudonymFields)
 	cfg.PseudonymReplacementsFile = strings.TrimSpace(cfg.PseudonymReplacementsFile)
 	cfg.PseudonymMapRetention = strings.ToLower(strings.TrimSpace(cfg.PseudonymMapRetention))
+	cfg.Manifest = strings.TrimSpace(cfg.Manifest)
+	cfg.ManifestTable = strings.TrimSpace(cfg.ManifestTable)
 	if cfg.ADXResource == "" {
 		cfg.ADXResource = defaultADXResource
 	}
@@ -340,6 +346,35 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 		}
 		if cfg.PseudonymReplacementsFile != "" && samePath(cfg.PseudonymReplacementsFile, artifactPath) {
 			return cfg, fmt.Errorf("-pseudonym-replacements-file must not use an output artifact path: %s", artifactPath)
+		}
+	}
+	if cfg.ManifestTable != "" && cfg.Manifest == "" {
+		return cfg, errors.New("-manifest-table requires -manifest")
+	}
+	if cfg.Manifest != "" {
+		switch {
+		case cfg.DumpTable == "" && !hasQueryInput(cfg):
+			return cfg, errors.New("-manifest requires -query, -query-file, or -dump-table")
+		case cfg.DumpTable != "" && cfg.ManifestTable != "":
+			return cfg, errors.New("-manifest-table is only used with -query or -query-file; -dump-table records its own table name")
+		case hasQueryInput(cfg) && cfg.ManifestTable == "":
+			return cfg, errors.New("-manifest with -query or -query-file requires -manifest-table")
+		case cfg.ManifestTable != "" && !isSafeADXIdentifier(cfg.ManifestTable):
+			return cfg, fmt.Errorf("invalid -manifest-table value %q; use only letters, numbers, and underscores, starting with a letter or underscore", cfg.ManifestTable)
+		}
+		for _, other := range []struct{ flag, path string }{
+			{"-pseudonym-map", cfg.PseudonymMap},
+			{"-pseudonym-replacements-file", cfg.PseudonymReplacementsFile},
+			{"-query-file", strings.TrimSpace(cfg.QueryFile)},
+		} {
+			if other.path != "" && samePath(cfg.Manifest, other.path) {
+				return cfg, fmt.Errorf("-manifest and %s must use different paths", other.flag)
+			}
+		}
+		for _, artifactPath := range artifactPaths {
+			if samePath(cfg.Manifest, artifactPath) {
+				return cfg, fmt.Errorf("-manifest must not use an output artifact path: %s", artifactPath)
+			}
 		}
 	}
 	switch cfg.PseudonymMapRetention {

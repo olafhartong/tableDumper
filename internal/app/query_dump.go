@@ -34,6 +34,9 @@ func dumpQuery(ctx context.Context, source querySource, cfg config, query string
 			progressf(progress, "[i] unpartitioned query exceeded the service result-size limit; retrying with hash partitions...")
 			return dumpPartitionedQuery(ctx, source, cfg, baseQuery, totalRows, 2, stats, pseudonyms, progress)
 		}
+		if response, err = withEmptyResultSchema(ctx, source, baseQuery, response, progress); err != nil {
+			return tableDumpOutput{Stats: stats}, err
+		}
 		if pseudonyms != nil {
 			response, err = pseudonyms.PseudonymizeResponse(ctx, response)
 			if err != nil {
@@ -90,10 +93,7 @@ func dumpPartitionedQuery(ctx context.Context, source querySource, cfg config, b
 		if len(partitions) == 0 {
 			stats.Chunks = 0
 			stats.Partitions = 0
-			if err := writeJSONFile(cfg.Output, []byte(`{"Schema":[],"Results":[]}`)); err != nil {
-				return tableDumpOutput{Stats: stats}, err
-			}
-			return tableDumpOutput{Stats: stats}, nil
+			return writeEmptyPartitionedResult(cfg, key, stats)
 		}
 
 		schema, rows, adxDataPath, adxSchemaPath, err := streamQueryPartitions(ctx, source, cfg, baseQuery, key, partitions, partitionCountValue, pseudonyms, "query", progress)
