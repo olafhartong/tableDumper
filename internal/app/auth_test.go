@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -104,5 +105,24 @@ func TestGetServicePrincipalToken(t *testing.T) {
 	}
 	if token != "token-value" {
 		t.Fatalf("unexpected token %q", token)
+	}
+}
+
+func TestParseAzureCLITokenResponse(t *testing.T) {
+	token, err := parseAzureCLITokenResponse([]byte(`{"accessToken":"token-value","expiresOn":"2026-09-13 20:00:00.000000","expires_on":1757786400,"tenant":"00000000-0000-0000-0000-000000000000","tokenType":"Bearer"}`))
+	if err != nil {
+		t.Fatalf("parseAzureCLITokenResponse returned error: %v", err)
+	}
+	if token != "token-value" {
+		t.Fatalf("unexpected token %q", token)
+	}
+
+	for _, output := range []string{`{}`, `{"accessToken":""}`, `{"access_token":"token-value"}`} {
+		if _, err := parseAzureCLITokenResponse([]byte(output)); err == nil || !strings.Contains(err.Error(), "did not return an access token") {
+			t.Fatalf("parseAzureCLITokenResponse(%s) error = %v, want missing token error", output, err)
+		}
+	}
+	if _, err := parseAzureCLITokenResponse([]byte("ERROR: Please run 'az login' to setup account.")); err == nil || !strings.Contains(err.Error(), "decode Azure CLI token response") {
+		t.Fatalf("parseAzureCLITokenResponse(non-JSON) error = %v, want decode error", err)
 	}
 }
