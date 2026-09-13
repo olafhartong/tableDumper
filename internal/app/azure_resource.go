@@ -131,18 +131,18 @@ func azureResourceNameKind(resourceType, resourceName string) entityKind {
 func (p *pseudonymizer) existingReplacement(kind entityKind, original string) (string, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	mapping, ok := p.mappings[entityKey(kind, original)]
+	mapping, ok := p.mappings[p.vaultKey(kind, original)]
 	return mapping.Pseudonym, ok
 }
 
 func (p *pseudonymizer) recordStructuralReplacement(kind entityKind, original, pseudonym string) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	key := entityKey(kind, original)
+	key := p.vaultKey(kind, original)
 	if mapping, ok := p.mappings[key]; ok {
 		return mapping.Pseudonym
 	}
-	p.mappings[key] = pseudonymMapping{EntityType: string(kind), Original: original, Pseudonym: pseudonym}
+	p.mappings[key] = p.newMapping(kind, original, key, pseudonym)
 	if _, exists := p.used[strings.ToLower(pseudonym)]; !exists {
 		p.used[strings.ToLower(pseudonym)] = key
 	}
