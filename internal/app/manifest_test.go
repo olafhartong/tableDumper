@@ -147,7 +147,7 @@ func TestManifestRecordsEachTableStatus(t *testing.T) {
 	}
 	assertManifestFileHash(t, manifestPath, captured.File, captured.SHA256, captured.Bytes)
 	assertManifestFileHash(t, manifestPath, captured.ADXDataFile, captured.ADXDataSHA256, nil)
-	if captured.TimeColumn != "Timestamp" || captured.Window == nil || captured.Window.End.Sub(captured.Window.Start) != 48*time.Hour || time.Since(captured.Window.End) > time.Minute {
+	if captured.TimeColumn != "Timestamp" || captured.Window == nil || captured.Window.End.Sub(captured.Window.Start) != 48*time.Hour || time.Since(captured.Window.End) > time.Minute || !captured.Window.IngestedBefore.Equal(captured.Window.End) {
 		t.Fatalf("unexpected window: %#v", captured.Window)
 	}
 
@@ -321,7 +321,10 @@ func TestManifestLoadRejectsInvariantViolations(t *testing.T) {
 		"absolute file":               func(m *collectionManifest) { m.Tables[0].File = "/data/device.json" },
 		"window without time column":  func(m *collectionManifest) { m.Tables[0].TimeColumn = "" },
 		"inverted window":             func(m *collectionManifest) { m.Tables[0].Window.Start = m.Tables[0].Window.End.Add(time.Hour) },
-		"unsupported schema version":  func(m *collectionManifest) { m.SchemaVersion = 2 },
+		"ingestion cutoff before end": func(m *collectionManifest) {
+			m.Tables[0].Window.IngestedBefore = m.Tables[0].Window.End.Add(-time.Minute)
+		},
+		"unsupported schema version": func(m *collectionManifest) { m.SchemaVersion = 2 },
 		"pseudonymized query text": func(m *collectionManifest) {
 			m.Pseudonymization = manifestPseudonymization{true, "irreversible", "0123456789abcdef"}
 			m.Tables[2].Query = "SigninLogs"

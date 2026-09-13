@@ -202,7 +202,7 @@ Example:
       "name": "DeviceProcessEvents",
       "status": "captured",
       "time_column": "Timestamp",
-      "window": {"start": "2026-09-06T09:58:12.41Z", "end": "2026-09-13T09:58:12.41Z"},
+      "window": {"start": "2026-09-06T09:58:12.41Z", "end": "2026-09-13T09:58:12.41Z", "ingested_before": "2026-09-13T09:58:12.41Z"},
       "columns": [{"name": "Timestamp", "type": "datetime"}, {"name": "DeviceName", "type": "string"}],
       "row_count": 48213,
       "partitions": 4,
@@ -217,7 +217,7 @@ Example:
       "name": "AADRiskyUsers",
       "status": "absent_in_source",
       "time_column": "TimeGenerated",
-      "window": {"start": "2026-09-06T10:02:40.12Z", "end": "2026-09-13T10:02:40.12Z"},
+      "window": {"start": "2026-09-06T10:02:40.12Z", "end": "2026-09-13T10:02:40.12Z", "ingested_before": "2026-09-13T10:02:40.12Z"},
       "note": "the table does not exist in the source"
     }
   ]
@@ -229,7 +229,7 @@ Rules:
 - Entries are keyed by `source` and `name`. Re-running a table replaces its entry, including replacing a previous `captured` entry with `not_captured` when the new run fails. Tables are sorted by that key.
 - Column types use the Kusto names produced by the ADX export mapping (`string`, `datetime`, `long`, `int`, `real`, `bool`, `guid`, `decimal`, `dynamic`).
 - `file` and `adx_data_file` are relative to the manifest's directory, with forward slashes. Hashes are SHA-256 over the final published files.
-- Table dumps record `time_column` and the fixed half-open `window` used by the query. Query entries have no window.
+- Table dumps record `time_column` and the fixed half-open `window` used by the query. `window.ingested_before` is the ingestion-time cutoff: rows ingested at or after it were excluded, so events that arrived later for the same window are not in the collection. Query entries have no window.
 - The manifest is validated when it is loaded and before it is written, and saved atomically with owner-only `0600` permissions. An existing invalid manifest stops the run before any query is sent.
 - A tool `version` is the module version from the build. Local builds from a Git checkout report a pseudo-version with the commit time and revision, such as `v0.0.0-20260913095812-57c7290a1b2c`, with `+dirty` for modified trees. Builds without module or VCS information record the revision if known, otherwise `(devel)` or `unknown`.
 - Runs are not locked against each other. Do not run collections that share a manifest concurrently.

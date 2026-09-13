@@ -69,6 +69,9 @@ type manifestTable struct {
 type manifestWindow struct {
 	Start time.Time `json:"start"`
 	End   time.Time `json:"end"`
+	// IngestedBefore excludes rows ingested at or after it, so the recorded
+	// counts describe one snapshot of the window.
+	IngestedBefore time.Time `json:"ingested_before,omitzero"`
 }
 
 type manifestColumn struct {
@@ -173,7 +176,7 @@ func (r *manifestRun) tableEntry(result manifestResult) (manifestTable, error) {
 		}
 		// Matches the query filter built by buildTableDumpBaseQuery.
 		end := result.cutoff.UTC().Truncate(time.Microsecond)
-		entry.TimeColumn, entry.Window = result.timeColumn, &manifestWindow{Start: end.Add(-lookback), End: end}
+		entry.TimeColumn, entry.Window = result.timeColumn, &manifestWindow{Start: end.Add(-lookback), End: end, IngestedBefore: end}
 	}
 	if !r.pseudonymization.Enabled {
 		// Incident queries filter on real identifiers, so query text is only
@@ -334,6 +337,9 @@ func validateManifestTable(table manifestTable) error {
 	}
 	if table.Window != nil && (table.Window.Start.IsZero() || !table.Window.Start.Before(table.Window.End)) {
 		return errors.New("window start must be before its end")
+	}
+	if table.Window != nil && !table.Window.IngestedBefore.IsZero() && table.Window.IngestedBefore.Before(table.Window.End) {
+		return errors.New("window ingested_before must not precede its end")
 	}
 	if (table.TimeColumn == "") != (table.Window == nil) {
 		return errors.New("time_column and window must be recorded together")
