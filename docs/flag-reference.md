@@ -43,6 +43,7 @@ This page lists every flag registered by the application. Follow the guide link 
 | `--pseudonymize` | boolean | `false` | Pseudonymize selected fields before collected data is written. | [Pseudonymization](pseudonymization.md#--pseudonymize) |
 | `--pseudonymize-filenames` | boolean | `false` | Pseudonymize filenames and keep matching path/command-line references linked. | [Filename linking](pseudonymization.md#--pseudonymize-filenames) |
 | `--pseudonym-map` | path | secure temporary file | Set a reusable, sensitive pseudonym mapping vault. | [Mapping vault](pseudonymization.md#--pseudonym-map) |
+| `--pseudonym-map-irreversible` | boolean | `false` | Create a mapping vault that stores keyed hashes instead of original values. | [Irreversible vault](pseudonymization.md#--pseudonym-map-irreversible) |
 | `--pseudonym-fields` | comma-separated patterns | `PSEUDONYM_FIELDS`, then built-in table policy | Override the selected-column allowlist. | [Field policy](pseudonymization.md#--pseudonym-fields) |
 | `--pseudonym-replacements-file` | path | `PSEUDONYM_REPLACEMENTS_FILE` | Load configured literal replacements from JSON. | [Replacements](pseudonymization.md#--pseudonym-replacements-file) |
 | `--pseudonym-map-retention` | `keep`, `delete` | `keep` | Choose what happens to the mapping vault after collection. This is non-interactive. | [Retention](pseudonymization.md#--pseudonym-map-retention) |

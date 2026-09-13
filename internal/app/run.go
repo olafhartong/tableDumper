@@ -35,7 +35,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 				return err
 			}
 		}
-		pseudonyms, err = newPseudonymizer(cfg.PseudonymMap)
+		pseudonyms, err = openPseudonymizer(cfg.PseudonymMap, cfg.PseudonymMapIrreversible)
 		if err != nil {
 			return err
 		}
@@ -44,6 +44,12 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		}
 		pseudonyms.ConfigureFilenamePseudonymization(cfg.PseudonymizeFilenames)
 		fmt.Fprintf(stderr, "[i] pseudonymization enabled; secure mapping file: %s\n", pseudonyms.Path())
+		if pseudonyms.Irreversible() {
+			fmt.Fprintln(stderr, "[i] irreversible mapping file: original values are stored only as keyed hashes.")
+			if !cfg.PseudonymMapIrreversible {
+				fmt.Fprintln(stderr, "[i] the existing mapping file is irreversible, so it stays irreversible without -pseudonym-map-irreversible.")
+			}
+		}
 		if cfg.PseudonymizeFilenames {
 			fmt.Fprintln(stderr, "[i] linked filename pseudonymization enabled for filename, path, and process command-line fields.")
 		}
