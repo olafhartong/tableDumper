@@ -60,7 +60,11 @@ func dumpTable(ctx context.Context, source querySource, cfg config, pseudonyms *
 		progressf(progress, "[i] row count is below %d; dumping in a single query...", cfg.DumpRowLimit)
 		response, err := source.RunQuery(ctx, baseQuery, progress)
 		if err != nil {
-			return tableDumpOutput{Stats: stats}, fmt.Errorf("dump %s: %w", cfg.DumpTable, err)
+			if !source.IsResultSizeExceeded(err) {
+				return tableDumpOutput{Stats: stats}, fmt.Errorf("dump %s: %w", cfg.DumpTable, err)
+			}
+			progressf(progress, "[i] single-query dump exceeded the service result-size limit; retrying with hash partitions...")
+			return dumpPartitionedQuery(ctx, source, cfg, baseQuery, totalRows, 2, stats, tableDumpCollection(cfg.DumpTable), pseudonyms, progress)
 		}
 		if pseudonyms != nil {
 			response, err = pseudonyms.PseudonymizeResponse(ctx, response)
@@ -98,43 +102,8 @@ func dumpTable(ctx context.Context, source querySource, cfg config, pseudonyms *
 		return output, nil
 	}
 
-	if cfg.OpenGraphExport {
-		return tableDumpOutput{Stats: stats}, errors.New("opengraph export is not supported for partitioned table dumps because it requires loading all rows into memory")
-	}
-
 	progressf(progress, "[-] row count is at or above %d; calculating hash partitions...", cfg.DumpRowLimit)
-	key, err := resolvePartitionKey(ctx, source, baseQuery, progress)
-	if err != nil {
-		return tableDumpOutput{Stats: stats}, err
-	}
-	partitions, partitionCountValue, err := resolveDumpPartitions(ctx, source, cfg, baseQuery, key, totalRows, progress)
-	if err != nil {
-		return tableDumpOutput{Stats: stats}, err
-	}
-	if len(partitions) == 0 {
-		stats.Chunks = 0
-		stats.Partitions = 0
-		progressf(progress, "[-] no non-empty partitions found")
-		if err := writeJSONFile(cfg.Output, []byte(`{"Schema":[],"Results":[]}`)); err != nil {
-			return tableDumpOutput{Stats: stats}, err
-		}
-		return tableDumpOutput{Stats: stats}, nil
-	}
-
-	schema, rows, adxDataPath, adxSchemaPath, err := streamTableDumpPartitions(ctx, source, cfg, baseQuery, key, partitions, partitionCountValue, pseudonyms, progress)
-	if err != nil {
-		return tableDumpOutput{Stats: stats}, err
-	}
-	stats.Chunks = len(partitions)
-	stats.Partitions = partitionCountValue
-	progressf(progress, "[i] completed partitioned dump with %d row(s)", rows)
-	return tableDumpOutput{
-		Schema:        schema,
-		Rows:          rows,
-		Stats:         stats,
-		ADXDataPath:   adxDataPath,
-		ADXSchemaPath: adxSchemaPath,
-	}, nil
+	return dumpPartitionedQuery(ctx, source, cfg, baseQuery, totalRows, 0, stats, tableDumpCollection(cfg.DumpTable), pseudonyms, progress)
 }
 
 // withTableDumpTimespan gives sources with a service-side time range one that
@@ -157,14 +126,6 @@ func withTableDumpTimespan(source querySource, cfg config, cutoff time.Time, pro
 	// service's boundary handling from excluding rows at the window edges.
 	end := cutoff.UTC().Truncate(time.Microsecond)
 	return windowed.withTimespan(end.Add(-lookback-time.Second), end.Add(time.Second)), nil
-}
-
-func resolveDumpPartitions(ctx context.Context, source querySource, cfg config, baseQuery string, key queryPartitionKey, totalRows int, progress io.Writer) ([]partitionCount, int, error) {
-	return resolveQueryPartitions(ctx, source, cfg, baseQuery, key, totalRows, cfg.DumpTable, progress)
-}
-
-func resolveQueryPartitions(ctx context.Context, source querySource, cfg config, baseQuery string, key queryPartitionKey, totalRows int, description string, progress io.Writer) ([]partitionCount, int, error) {
-	return resolveQueryPartitionsStartingAt(ctx, source, cfg, baseQuery, key, totalRows, 0, description, progress)
 }
 
 func resolveQueryPartitionsStartingAt(ctx context.Context, source querySource, cfg config, baseQuery string, key queryPartitionKey, totalRows, minimumPartitions int, description string, progress io.Writer) ([]partitionCount, int, error) {
@@ -206,10 +167,6 @@ func resolveQueryPartitionsStartingAt(ctx context.Context, source querySource, c
 			return nil, 0, fmt.Errorf("unable to split %s into chunks below %d rows after trying %d hash partitions", description, cfg.DumpRowLimit, partitionCountValue)
 		}
 	}
-}
-
-func streamTableDumpPartitions(ctx context.Context, source querySource, cfg config, baseQuery string, key queryPartitionKey, partitions []partitionCount, partitionCountValue int, pseudonyms *pseudonymizer, progress io.Writer) ([]queryColumn, int, string, string, error) {
-	return streamQueryPartitions(ctx, source, cfg, baseQuery, key, partitions, partitionCountValue, pseudonyms, "dump "+cfg.DumpTable, progress)
 }
 
 func streamQueryPartitions(ctx context.Context, source querySource, cfg config, baseQuery string, key queryPartitionKey, partitions []partitionCount, partitionCountValue int, pseudonyms *pseudonymizer, description string, progress io.Writer) ([]queryColumn, int, string, string, error) {

@@ -18,7 +18,7 @@ Small Go CLI to:
   - Azure CLI credentials from `az login`
 - Writes the API response to a pretty-printed JSON file
 - Can dump an entire table by name with a default `30d` lookback
-- Counts query and table-dump results first, then uses hash-partitioned chunk queries when a result set reaches `30000` rows or Defender rejects an unpartitioned query for exceeding its result-size limit
+- Counts query and table-dump results first, then uses hash-partitioned chunk queries when a result set reaches `30000` rows or the service rejects an unpartitioned query or table dump for exceeding its result-size limit
 - Optionally writes Azure Data Explorer ingestion artifacts
 - Optionally writes a BloodHound OpenGraph JSON payload
 - Optionally uploads JSON data into Azure Data Explorer
@@ -194,7 +194,7 @@ Use `--dump-table` to dump all rows from a Defender XDR advanced hunting table o
 | count
 ```
 
-If the count is below `30000`, it dumps the table directly. If the count is `30000` or higher, it counts hash partitions and then queries each non-empty partition sequentially, streaming each completed chunk to one JSON response file with the usual `Schema` and `Results` fields. Sequential requests avoid exhausting the tenant's Defender hunting CPU quota. If Defender responds with HTTP 429, the tool pauses for the server-specified interval and retries instead of aborting the dump. Partitioned dumps do not keep the full result set in memory; only the current chunk response is held while it is written.
+If the count is below `30000`, it dumps the table directly. If the count is `30000` or higher, it counts hash partitions and then queries each non-empty partition sequentially, streaming each completed chunk to one JSON response file with the usual `Schema` and `Results` fields. Sequential requests avoid exhausting the tenant's Defender hunting CPU quota. If a single query or a partition exceeds the service's byte-size limit, the dump retries with more hash partitions. If Defender responds with HTTP 429, the tool pauses for the server-specified interval and retries instead of aborting the dump. Partitioned dumps do not keep the full result set in memory; only the current chunk response is held while it is written.
 
 When `--adx-export` is used with a partitioned dump, the ADX newline-delimited JSON sidecar is streamed at the same time as the main output file.
 

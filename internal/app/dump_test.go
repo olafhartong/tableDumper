@@ -289,3 +289,62 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 		}
 	}
 }
+
+func TestDumpTableFallsBackWhenSingleQueryExceedsByteLimit(t *testing.T) {
+	var baseQuery string
+	attemptedSingleQuery := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := readAdvancedQueryRequest(t, r)
+		if baseQuery == "" {
+			baseQuery = strings.TrimSuffix(query, "\n| count")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch query {
+		case baseQuery + "\n| count":
+			io.WriteString(w, `{"Results":[{"Count":2}]}`)
+		case baseQuery:
+			attemptedSingleQuery = true
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"error":{"code":"BadRequest","message":"Query execution has exceeded the allowed result size. Optimize your query by limiting the amount of results and try again."}}`)
+		case baseQuery + "\n| take 0":
+			io.WriteString(w, `{"Schema":[{"Name":"ReportId","Type":"Int64"}],"Results":[]}`)
+		case baseQuery + "\n| summarize Count=count() by DumpPartition=(tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"ReportId\"])))), 0, 15))) % 2)":
+			io.WriteString(w, `{"Results":[{"DumpPartition":0,"Count":1},{"DumpPartition":1,"Count":1}]}`)
+		case baseQuery + "\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"ReportId\"])))), 0, 15))) % 2) == 0":
+			io.WriteString(w, `{"Schema":[{"Name":"ReportId","Type":"Int64"}],"Results":[{"ReportId":1}]}`)
+		case baseQuery + "\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"ReportId\"])))), 0, 15))) % 2) == 1":
+			io.WriteString(w, `{"Schema":[{"Name":"ReportId","Type":"Int64"}],"Results":[{"ReportId":2}]}`)
+		default:
+			t.Fatalf("unexpected query %q", query)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config{
+		DumpTable:      "DeviceProcessEvents",
+		DumpLookback:   "12h",
+		DumpTimeColumn: "Timestamp",
+		DumpRowLimit:   defaultDumpRowLimit,
+		Output:         filepath.Join(t.TempDir(), "processes.json"),
+	}
+	var progress bytes.Buffer
+	output, err := dumpTable(context.Background(), newDefenderQuerySource(server.Client(), server.URL, "token-value"), cfg, nil, &progress)
+	if err != nil {
+		t.Fatalf("dumpTable returned error: %v", err)
+	}
+	if !attemptedSingleQuery {
+		t.Fatal("single-query dump was not attempted")
+	}
+	if output.Rows != 2 || output.Stats.TotalRows != 2 || output.Stats.Chunks != 2 || output.Stats.Partitions != 2 {
+		t.Fatalf("unexpected output %#v", output)
+	}
+	for _, want := range []string{
+		"single-query dump exceeded the service result-size limit",
+		"counting rows across 2 hash partition(s)",
+		"completed partitioned dump with 2 row(s)",
+	} {
+		if !strings.Contains(progress.String(), want) {
+			t.Fatalf("expected progress to contain %q, got:\n%s", want, progress.String())
+		}
+	}
+}

@@ -465,3 +465,76 @@ func TestKQLTimespanDuration(t *testing.T) {
 		}
 	}
 }
+
+func TestLogAnalyticsTableDumpRetriesPartitionThatExceedsByteLimit(t *testing.T) {
+	payload := [][2]string{{"TimeGenerated", "datetime"}, {"Payload", "string"}}
+	row := func(i int) []any { return []any{fmt.Sprintf("2026-09-01T10:%02d:00Z", i), fmt.Sprintf("event-%d", i)} }
+	server, _ := newLogAnalyticsTestServer(t, func(w http.ResponseWriter, request logAnalyticsTestRequest) {
+		switch query := request.Query; {
+		case strings.HasSuffix(query, "\n| count"):
+			io.WriteString(w, logAnalyticsTableBody(t, [][2]string{{"Count", "long"}}, []any{4}))
+		case strings.HasSuffix(query, "\n| take 0"):
+			io.WriteString(w, logAnalyticsTableBody(t, payload))
+		case strings.HasSuffix(query, "% 2)"):
+			io.WriteString(w, logAnalyticsTableBody(t, [][2]string{{"DumpPartition", "long"}, {"Count", "long"}}, []any{0, 2}, []any{1, 2}))
+		case strings.HasSuffix(query, "% 2) == 0"):
+			io.WriteString(w, logAnalyticsPartialSizeBody)
+		case strings.HasSuffix(query, "% 4)"):
+			io.WriteString(w, logAnalyticsTableBody(t, [][2]string{{"DumpPartition", "long"}, {"Count", "long"}}, []any{0, 1}, []any{1, 1}, []any{2, 1}, []any{3, 1}))
+		case strings.Contains(query, "% 4) == "):
+			partition := int(query[len(query)-1] - '0')
+			io.WriteString(w, logAnalyticsTableBody(t, payload, row(partition)))
+		default:
+			t.Errorf("unexpected query %q", query)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	})
+	source := &logAnalyticsSource{httpClient: server.Client(), endpoint: server.URL + "/v1", workspaceID: testWorkspaceID}
+	cfg := config{Source: sourceLogAnalytics, DumpTable: "AADNonInteractiveUserSignInLogs", DumpLookback: "1d", DumpTimeColumn: "TimeGenerated", DumpRowLimit: 4, Output: filepath.Join(t.TempDir(), "signins.json")}
+	var progress bytes.Buffer
+	output, err := dumpTable(context.Background(), source, cfg, nil, &progress)
+	if err != nil {
+		t.Fatalf("dumpTable returned error: %v\n%s", err, progress.String())
+	}
+	if output.Rows != 4 || output.Stats.Chunks != 4 || output.Stats.Partitions != 4 {
+		t.Fatalf("unexpected output %#v", output)
+	}
+	if !strings.Contains(progress.String(), "retrying with at least 4 hash partitions") {
+		t.Fatalf("partition retry was not reported:\n%s", progress.String())
+	}
+	body, err := os.ReadFile(cfg.Output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var written queryResponse
+	if err := json.Unmarshal(body, &written); err != nil || len(written.Results) != 4 {
+		t.Fatalf("unexpected output file: %v\n%s", err, body)
+	}
+}
+
+func TestLogAnalyticsTableDumpFailsWhenOneRowExceedsByteLimit(t *testing.T) {
+	server, requests := newLogAnalyticsTestServer(t, func(w http.ResponseWriter, request logAnalyticsTestRequest) {
+		switch query := request.Query; {
+		case strings.HasSuffix(query, "\n| count"):
+			io.WriteString(w, logAnalyticsTableBody(t, [][2]string{{"Count", "long"}}, []any{2}))
+		case strings.HasSuffix(query, "\n| take 0"):
+			io.WriteString(w, logAnalyticsTableBody(t, [][2]string{{"Payload", "string"}}))
+		case strings.HasSuffix(query, "% 2)"):
+			io.WriteString(w, logAnalyticsTableBody(t, [][2]string{{"DumpPartition", "long"}, {"Count", "long"}}, []any{0, 1}, []any{1, 1}))
+		default:
+			io.WriteString(w, logAnalyticsPartialSizeBody)
+		}
+	})
+	source := &logAnalyticsSource{httpClient: server.Client(), endpoint: server.URL + "/v1", workspaceID: testWorkspaceID}
+	cfg := config{Source: sourceLogAnalytics, DumpTable: "AppTraces", DumpLookback: "1d", DumpTimeColumn: "TimeGenerated", DumpRowLimit: 10, Output: filepath.Join(t.TempDir(), "traces.json")}
+	_, err := dumpTable(context.Background(), source, cfg, nil, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "individual row that exceeds the service result-size limit") {
+		t.Fatalf("expected an individual row size error, got %v", err)
+	}
+	if len(*requests) != 5 {
+		t.Fatalf("expected count, single query, schema, partition count, and one partition download; got %d requests", len(*requests))
+	}
+	if _, statErr := os.Stat(cfg.Output); !os.IsNotExist(statErr) {
+		t.Fatal("incomplete result was written to the output file")
+	}
+}

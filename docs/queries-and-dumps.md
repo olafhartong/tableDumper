@@ -28,10 +28,10 @@ Both sources share the same pipeline: counting, hash partitioning, pseudonymizat
 - `--dump-time-column` defaults to `TimeGenerated`.
 - A table dump filtering on `TimeGenerated` also sends the fixed dump window, padded by one second, as the request `timespan`. The query's own filter remains authoritative. With another `--dump-time-column`, no `timespan` is sent, because the service applies it to `TimeGenerated` and could exclude rows the query selects. Free-form queries never send a `timespan`; the query text alone defines the time range.
 - Requests ask the service for up to ten minutes (`Prefer: wait=600`). The shared `--timeout` still applies, so raise it for long-running queries.
-- The service can answer HTTP 200 with a partial result and an `error` object when a limit is reached. Such a response is never used. A result-size error triggers the same automatic hash-partition retry as Defender's result-size error for free-form queries; any other partial result fails the collection.
+- The service can answer HTTP 200 with a partial result and an `error` object when a limit is reached. Such a response is never used. A result-size error triggers the same automatic hash-partition retry as Defender's result-size error, for queries and table dumps; any other partial result fails the collection.
 - HTTP 429 responses are retried with the same waiting behavior as Defender.
 
-The query API returns at most 500,000 records and about 100 MB per response. Keep `--dump-row-limit` well below the record limit, and lower it for wide tables so each chunk stays under the size limit. A table dump chunk that still exceeds the size limit fails explicitly instead of being retried.
+The query API returns at most 500,000 records and about 100 MB per response. Keep `--dump-row-limit` well below the record limit, and lower it for wide tables so each chunk stays under the size limit. A chunk that still exceeds the size limit is retried with more hash partitions; a single row that exceeds it fails the collection.
 
 Tables with restricted table-level access can return no rows rather than an error, so an empty result is not proof that the table is empty. Check the workspace permissions described in [Log Analytics authentication](authentication-and-networking.md#--workspace-id).
 
@@ -125,7 +125,7 @@ Controls the maximum target size of each query or table-dump request. Default: `
 - If the count is equal to or above the limit, the tool counts hash partitions.
 - If any partition is still at or above the limit, the partition count is doubled and checked again.
 - Non-empty partitions are then downloaded sequentially and streamed into the output.
-- If the source reports that even a below-threshold query result or partition exceeds its byte-size limit, the tool retries with more hash partitions automatically.
+- If the source reports that even a below-threshold query, table dump, or partition exceeds its byte-size limit, the tool retries with more hash partitions automatically. A single row above that limit fails the collection.
 
 This is a query-size and memory-control setting, not a cap on the total number of rows written. Lower values create more requests; higher values create larger responses.
 
