@@ -281,6 +281,17 @@ func TestParseFlagsRejectsPseudonymMapAtOutputPath(t *testing.T) {
 	}
 }
 
+func TestParseFlagsIrreversiblePseudonymMapRequiresPseudonymization(t *testing.T) {
+	cfg, err := parseFlags([]string{"--query", "DeviceInfo | limit 1", "--pseudonymize", "--pseudonym-map-irreversible"}, io.Discard)
+	if err != nil || !cfg.PseudonymMapIrreversible {
+		t.Fatalf("irreversible pseudonym map was not enabled: %v", err)
+	}
+	_, err = parseFlags([]string{"--query", "DeviceInfo | limit 1", "--pseudonym-map-irreversible"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "-pseudonym-map-irreversible requires -pseudonymize") {
+		t.Fatalf("expected irreversible pseudonym map validation error, got %v", err)
+	}
+}
+
 func TestParseFlagsRejectsReplacementFileWithoutPseudonymization(t *testing.T) {
 	_, err := parseFlags([]string{
 		"--query", "DeviceInfo | limit 1",

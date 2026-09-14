@@ -4,10 +4,12 @@ Small Go CLI to:
 
 - run a Microsoft Defender XDR advanced hunting query through Microsoft Graph, automatically partitioning large result sets, and write the JSON response to disk
 - dump a whole Defender XDR advanced hunting table over a lookback window, partitioning large dumps into chunks automatically
+- run the same queries and table dumps against a Log Analytics (Microsoft Sentinel) workspace
 - generate Azure Data Explorer ingestion artifacts from those results
 - generate a BloodHound OpenGraph JSON payload from graph-shaped Defender results
 - upload a JSON file into an Azure Data Explorer table in configurable batches
 - pseudonymize collected identifiers with an embedded NER model before any result is written
+- record a machine-readable manifest of which tables a collection captured, found empty, failed to collect, or found missing
 
 ## What it does
 
@@ -17,7 +19,7 @@ Small Go CLI to:
   - Azure CLI credentials from `az login`
 - Writes the API response to a pretty-printed JSON file
 - Can dump an entire table by name with a default `30d` lookback
-- Counts query and table-dump results first, then uses hash-partitioned chunk queries when a result set reaches `30000` rows or Defender rejects an unpartitioned query for exceeding its result-size limit
+- Counts query and table-dump results first, then uses hash-partitioned chunk queries when a result set reaches `30000` rows or the service rejects an unpartitioned query or table dump for exceeding its result-size limit
 - Optionally writes Azure Data Explorer ingestion artifacts
 - Optionally writes a BloodHound OpenGraph JSON payload
 - Optionally uploads JSON data into Azure Data Explorer
@@ -86,7 +88,33 @@ Detailed documentation for every command-line flag is available in [docs/README.
   --adx-upload-file defender-results.adx.json
 ```
 
-### 6. Pseudonymize a collection
+### 6. Dump a Microsoft Sentinel / Log Analytics table
+
+```bash
+./tableDumper \
+  --auth azcli \
+  --source loganalytics \
+  --workspace-id <workspace-id> \
+  --dump-table SigninLogs \
+  --dump-lookback 7d \
+  --output signinlogs.json
+```
+
+`--source loganalytics` uses the Log Analytics query API with the same credentials, a `TimeGenerated` default time column, and the same partitioning, pseudonymization, and ADX export. The identity needs the Log Analytics Reader role on the workspace. See [query sources](docs/queries-and-dumps.md#--source).
+
+### 7. Record a collection manifest
+
+```bash
+./tableDumper --auth azcli --dump-table DeviceProcessEvents \
+  --output incident/device-process-events.json --manifest incident/manifest.json
+
+./tableDumper --auth azcli --query-file incident.kql \
+  --output incident/alerts.json --manifest incident/manifest.json --manifest-table IncidentAlerts
+```
+
+Each run adds or replaces one table entry with status `captured`, `captured_empty`, `not_captured`, or `absent_in_source`, plus its columns, row count, window, and file hashes. With `--pseudonymize`, the manifest records the vault `key_id` and no original values. See [the manifest guide](docs/queries-and-dumps.md#--manifest).
+
+### 8. Pseudonymize a collection
 
 ```bash
 ./tableDumper \
@@ -179,13 +207,13 @@ Use `--dump-table` to dump all rows from a Defender XDR advanced hunting table o
 | count
 ```
 
-If the count is below `30000`, it dumps the table directly. If the count is `30000` or higher, it counts hash partitions and then queries each non-empty partition sequentially, streaming each completed chunk to one JSON response file with the usual `Schema` and `Results` fields. Sequential requests avoid exhausting the tenant's Defender hunting CPU quota. If Defender responds with HTTP 429, the tool pauses for the server-specified interval and retries instead of aborting the dump. Partitioned dumps do not keep the full result set in memory; only the current chunk response is held while it is written.
+If the count is below `30000`, it dumps the table directly. If the count is `30000` or higher, it counts hash partitions and then queries each non-empty partition sequentially, streaming each completed chunk to one JSON response file with the usual `Schema` and `Results` fields. Sequential requests avoid exhausting the tenant's Defender hunting CPU quota. If a single query or a partition exceeds the service's byte-size limit, the dump retries with more hash partitions. If Defender responds with HTTP 429, the tool pauses for the server-specified interval and retries instead of aborting the dump. Partitioned dumps do not keep the full result set in memory; only the current chunk response is held while it is written.
 
 When `--adx-export` is used with a partitioned dump, the ADX newline-delimited JSON sidecar is streamed at the same time as the main output file.
 
 `--opengraph-export` is only supported for non-partitioned queries and table dumps because building the OpenGraph payload requires all rows in memory.
 
-Table dumps reuse one fixed UTC time window across all requests. Partitioned collection validates bucket totals, returned row counts, and partition-key types before publishing. See [partition safety and limitations](docs/queries-and-dumps.md#partition-safety-and-limitations) for dynamic-only results, repeated keys, and source changes.
+Table dumps reuse one fixed UTC time window and ingestion-time cutoff across all requests. Partitioned collection validates bucket totals, returned row counts, and partition-key types before publishing. See [partition safety and limitations](docs/queries-and-dumps.md#partition-safety-and-limitations) for dynamic-only results, repeated keys, and source changes.
 
 During a table dump, progress is written to stderr. It reports the matching row count, partition sizing, and each completed partition chunk. The final summary report is still written to stdout.
 
@@ -278,6 +306,8 @@ The mapping file is a sensitive, reversible vault: it contains both original val
 ./tableDumper --dump-table DeviceLogonEvents --output logons.json \
   --pseudonymize --pseudonym-map ./collection.pseudonyms.json
 ```
+
+To keep that consistency without storing original values, add `--pseudonym-map-irreversible` when creating the vault. Mappings then record a seed-keyed HMAC of each original instead of the original itself, pseudonyms stay identical, and the vault stays irreversible whenever it is reopened. Anyone holding the vault can still confirm a guessed original by recomputing its HMAC, so it still needs protecting. See [the irreversible vault guide](docs/pseudonymization.md#--pseudonym-map-irreversible).
 
 After a successful collection, the mapping file is kept by default without prompting. To remove it automatically after a successful run, choose `delete` explicitly:
 
@@ -428,6 +458,22 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 `--client-secret`
 - Service principal client secret for Microsoft Graph Defender XDR query auth
 
+`--source`
+- Query source: `defender` or `loganalytics`
+- Default: `defender`
+
+`--workspace-id`
+- Log Analytics workspace ID GUID for `--source loganalytics`
+- Can also be set with `LOG_ANALYTICS_WORKSPACE_ID`
+
+`--la-endpoint`
+- Log Analytics query API base URL
+- Default: `https://api.loganalytics.azure.com/v1`
+
+`--la-resource`
+- Log Analytics OAuth resource
+- Default: `https://api.loganalytics.io`
+
 `--query`
 - Inline Defender XDR KQL query
 
@@ -444,7 +490,7 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 
 `--dump-time-column`
 - Table time column used for the lookback filter
-- Default: `Timestamp`
+- Default: `Timestamp`, or `TimeGenerated` with `--source loganalytics`
 
 `--dump-row-limit`
 - Maximum rows per query or table-dump chunk before partitioning
@@ -458,6 +504,13 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 - Path for the query JSON response
 - Default: `results.json`
 
+`--manifest`
+- Collection manifest JSON file to create or update with this run's table status, columns, counts, and file hashes
+
+`--manifest-table`
+- Table name recorded in `--manifest` for query results
+- Required with `--manifest` and `--query`/`--query-file`
+
 `--pseudonymize`
 - Apply embedded NER and identifier pseudonymization before collected data is written
 
@@ -468,6 +521,10 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 `--pseudonym-map`
 - Reusable sensitive mapping-vault path
 - When omitted, a secure temporary file is created
+
+`--pseudonym-map-irreversible`
+- Create a mapping vault that stores keyed hashes instead of original values
+- Requires `--pseudonymize`; an existing irreversible vault stays irreversible without it
 
 `--pseudonym-fields`
 - Override the built-in per-table field policy with a comma-separated allowlist
@@ -592,3 +649,5 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 ## Permissions
 
 For query mode, your app registration needs the Microsoft Graph `ThreatHunting.Read.All` application permission, and admin consent must be granted.
+
+For `--source loganalytics`, the identity needs the Log Analytics Reader role (or Reader / Microsoft Sentinel Reader) on the workspace instead.

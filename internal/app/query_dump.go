@@ -9,10 +9,10 @@ import (
 	"strings"
 )
 
-func dumpQuery(ctx context.Context, httpClient *http.Client, cfg config, token, query string, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
+func dumpQuery(ctx context.Context, source querySource, cfg config, query string, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
 	baseQuery := partitionableQuery(query)
 	progressf(progress, "[-] counting rows returned by query...")
-	_, countResponse, err := runAdvancedQueryWithProgress(ctx, httpClient, cfg.Endpoint, token, buildTableDumpCountQuery(baseQuery), progress)
+	countResponse, err := source.RunQuery(ctx, buildTableDumpCountQuery(baseQuery), progress)
 	if err != nil {
 		return tableDumpOutput{}, fmt.Errorf("count query rows: %w", err)
 	}
@@ -26,13 +26,16 @@ func dumpQuery(ctx context.Context, httpClient *http.Client, cfg config, token, 
 
 	if totalRows < cfg.DumpRowLimit {
 		progressf(progress, "[i] row count is below %d; running query without partitioning...", cfg.DumpRowLimit)
-		_, response, err := runAdvancedQueryWithProgress(ctx, httpClient, cfg.Endpoint, token, baseQuery, progress)
+		response, err := source.RunQuery(ctx, baseQuery, progress)
 		if err != nil {
-			if !isQueryResultSizeExceeded(err) {
+			if !source.IsResultSizeExceeded(err) {
 				return tableDumpOutput{Stats: stats}, err
 			}
 			progressf(progress, "[i] unpartitioned query exceeded the service result-size limit; retrying with hash partitions...")
-			return dumpPartitionedQuery(ctx, httpClient, cfg, token, baseQuery, totalRows, 2, stats, pseudonyms, progress)
+			return dumpPartitionedQuery(ctx, source, cfg, baseQuery, totalRows, 2, stats, queryCollection, pseudonyms, progress)
+		}
+		if response, err = withEmptyResultSchema(ctx, source, baseQuery, response, progress); err != nil {
+			return tableDumpOutput{Stats: stats}, err
 		}
 		if pseudonyms != nil {
 			response, err = pseudonyms.PseudonymizeResponse(ctx, response)
@@ -70,37 +73,53 @@ func dumpQuery(ctx context.Context, httpClient *http.Client, cfg config, token, 
 	}
 
 	progressf(progress, "[-] row count is at or above %d; calculating hash partitions...", cfg.DumpRowLimit)
-	return dumpPartitionedQuery(ctx, httpClient, cfg, token, baseQuery, totalRows, 0, stats, pseudonyms, progress)
+	return dumpPartitionedQuery(ctx, source, cfg, baseQuery, totalRows, 0, stats, queryCollection, pseudonyms, progress)
 }
 
-func dumpPartitionedQuery(ctx context.Context, httpClient *http.Client, cfg config, token, baseQuery string, totalRows, minimumPartitions int, stats tableDumpStats, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
+// partitionedCollection names a free-form query or a table dump in the
+// progress messages and errors of the shared partitioned collection.
+type partitionedCollection struct {
+	kind   string // "query" or "dump"
+	plural string // "queries" or "table dumps"
+	rows   string // what the partition counts describe
+	chunks string // prefix of partition download errors
+}
+
+var queryCollection = partitionedCollection{kind: "query", plural: "queries", rows: "query results", chunks: "query"}
+
+func tableDumpCollection(table string) partitionedCollection {
+	return partitionedCollection{kind: "dump", plural: "table dumps", rows: table, chunks: "dump " + table}
+}
+
+// dumpPartitionedQuery collects baseQuery in hash partitions. When a partition
+// still exceeds the service result-size limit, it retries with at least twice
+// as many partitions.
+func dumpPartitionedQuery(ctx context.Context, source querySource, cfg config, baseQuery string, totalRows, minimumPartitions int, stats tableDumpStats, collection partitionedCollection, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
 	if cfg.OpenGraphExport {
-		return tableDumpOutput{Stats: stats}, errors.New("opengraph export is not supported for partitioned queries because it requires loading all rows into memory")
+		return tableDumpOutput{Stats: stats}, fmt.Errorf("opengraph export is not supported for partitioned %s because it requires loading all rows into memory", collection.plural)
 	}
 
-	key, err := resolvePartitionKey(ctx, httpClient, cfg, token, baseQuery, progress)
+	key, err := resolvePartitionKey(ctx, source, baseQuery, progress)
 	if err != nil {
 		return tableDumpOutput{Stats: stats}, err
 	}
 	for {
-		partitions, partitionCountValue, err := resolveQueryPartitionsStartingAt(ctx, httpClient, cfg, token, baseQuery, key, totalRows, minimumPartitions, "query results", progress)
+		partitions, partitionCountValue, err := resolveQueryPartitionsStartingAt(ctx, source, cfg, baseQuery, key, totalRows, minimumPartitions, collection.rows, progress)
 		if err != nil {
 			return tableDumpOutput{Stats: stats}, err
 		}
 		if len(partitions) == 0 {
 			stats.Chunks = 0
 			stats.Partitions = 0
-			if err := writeJSONFile(cfg.Output, []byte(`{"Schema":[],"Results":[]}`)); err != nil {
-				return tableDumpOutput{Stats: stats}, err
-			}
-			return tableDumpOutput{Stats: stats}, nil
+			progressf(progress, "[-] no non-empty partitions found")
+			return writeEmptyPartitionedResult(cfg, key, stats)
 		}
 
-		schema, rows, adxDataPath, adxSchemaPath, err := streamQueryPartitions(ctx, httpClient, cfg, token, baseQuery, key, partitions, partitionCountValue, pseudonyms, "query", progress)
+		schema, rows, adxDataPath, adxSchemaPath, err := streamQueryPartitions(ctx, source, cfg, baseQuery, key, partitions, partitionCountValue, pseudonyms, collection.chunks, progress)
 		if err == nil {
 			stats.Chunks = len(partitions)
 			stats.Partitions = partitionCountValue
-			progressf(progress, "[i] completed partitioned query with %d row(s)", rows)
+			progressf(progress, "[i] completed partitioned %s with %d row(s)", collection.kind, rows)
 			return tableDumpOutput{
 				Schema:        schema,
 				Rows:          rows,
@@ -109,11 +128,11 @@ func dumpPartitionedQuery(ctx context.Context, httpClient *http.Client, cfg conf
 				ADXSchemaPath: adxSchemaPath,
 			}, nil
 		}
-		if !isQueryResultSizeExceeded(err) {
+		if !source.IsResultSizeExceeded(err) {
 			return tableDumpOutput{Stats: stats}, err
 		}
 		if maxPartitionRows(partitions) <= 1 {
-			return tableDumpOutput{Stats: stats}, fmt.Errorf("query result contains an individual row that exceeds the service result-size limit: %w", err)
+			return tableDumpOutput{Stats: stats}, fmt.Errorf("%s result contains an individual row that exceeds the service result-size limit: %w", collection.kind, err)
 		}
 		minimumPartitions = partitionCountValue * 2
 		progressf(progress, "[i] a partition still exceeded the service result-size limit; retrying with at least %d hash partitions...", minimumPartitions)

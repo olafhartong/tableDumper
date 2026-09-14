@@ -15,16 +15,24 @@ import (
 )
 
 const (
-	defaultEndpoint     = "https://graph.microsoft.com/v1.0"
-	defaultResource     = "https://graph.microsoft.com"
-	defaultADXResource  = "https://api.kusto.windows.net"
-	defaultLoginBaseURL = "https://login.microsoftonline.com"
-	defaultOutputFile   = "results.json"
-	defaultDumpLookback = "30d"
-	defaultDumpRowLimit = 30000
+	defaultEndpoint             = "https://graph.microsoft.com/v1.0"
+	defaultResource             = "https://graph.microsoft.com"
+	defaultLogAnalyticsEndpoint = "https://api.loganalytics.azure.com/v1"
+	defaultLogAnalyticsResource = "https://api.loganalytics.io"
+	defaultADXResource          = "https://api.kusto.windows.net"
+	defaultLoginBaseURL         = "https://login.microsoftonline.com"
+	defaultOutputFile           = "results.json"
+	defaultDumpLookback         = "30d"
+	defaultDumpRowLimit         = 30000
+	defaultDumpTimeColumn       = "Timestamp"
+	logAnalyticsTimeColumn      = "TimeGenerated"
 )
 
 type config struct {
+	Source                    string
+	WorkspaceID               string
+	LogAnalyticsEndpoint      string
+	LogAnalyticsResource      string
 	AuthMode                  string
 	TenantID                  string
 	ClientID                  string
@@ -60,9 +68,12 @@ type config struct {
 	Pseudonymize              bool
 	PseudonymizeFilenames     bool
 	PseudonymMap              string
+	PseudonymMapIrreversible  bool
 	PseudonymFields           string
 	PseudonymReplacementsFile string
 	PseudonymMapRetention     string
+	Manifest                  string
+	ManifestTable             string
 	Endpoint                  string
 	Resource                  string
 	LoginBaseURL              string
@@ -81,18 +92,24 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	fs := flag.NewFlagSet("tableDumper", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
+	fs.StringVar(&cfg.Source, "source", sourceDefender, "Query source: defender (Defender XDR advanced hunting) or loganalytics (Log Analytics / Microsoft Sentinel workspace)")
+	fs.StringVar(&cfg.WorkspaceID, "workspace-id", envOrDotEnvAny(dotenv, "LOG_ANALYTICS_WORKSPACE_ID"), "Log Analytics workspace ID (GUID) for -source loganalytics")
+	fs.StringVar(&cfg.LogAnalyticsEndpoint, "la-endpoint", defaultLogAnalyticsEndpoint, "Log Analytics query API base URL")
+	fs.StringVar(&cfg.LogAnalyticsResource, "la-resource", defaultLogAnalyticsResource, "OAuth resource/audience for Log Analytics access tokens")
 	fs.StringVar(&cfg.AuthMode, "auth", "auto", "Authentication mode: auto, sp, azcli, or none")
 	fs.StringVar(&cfg.TenantID, "tenant-id", envOrDotEnv("AZURE_TENANT_ID", dotenv), "Microsoft Entra tenant ID")
 	fs.StringVar(&cfg.ClientID, "client-id", envOrDotEnv("AZURE_CLIENT_ID", dotenv), "Service principal client ID")
 	fs.StringVar(&cfg.ClientSecret, "client-secret", envOrDotEnv("AZURE_CLIENT_SECRET", dotenv), "Service principal client secret")
 	fs.StringVar(&cfg.Query, "query", "", "KQL query string to run")
 	fs.StringVar(&cfg.QueryFile, "query-file", "", "Path to a file containing the KQL query")
-	fs.StringVar(&cfg.DumpTable, "dump-table", "", "Defender advanced hunting table name to dump")
+	fs.StringVar(&cfg.DumpTable, "dump-table", "", "Defender advanced hunting or Log Analytics table name to dump")
 	fs.StringVar(&cfg.DumpLookback, "dump-lookback", defaultDumpLookback, "Lookback timespan for -dump-table, for example 30d, 12h, or 90m")
-	fs.StringVar(&cfg.DumpTimeColumn, "dump-time-column", "Timestamp", "Time column used for -dump-table lookback filtering")
+	fs.StringVar(&cfg.DumpTimeColumn, "dump-time-column", defaultDumpTimeColumn, "Time column used for -dump-table lookback filtering (TimeGenerated when -source loganalytics)")
 	fs.IntVar(&cfg.DumpRowLimit, "dump-row-limit", defaultDumpRowLimit, "Maximum rows per advanced hunting query chunk before partitioning")
 	fs.IntVar(&cfg.DumpParallelism, "dump-parallelism", 1, "Deprecated compatibility flag; partition requests are always sequential")
 	fs.StringVar(&cfg.Output, "output", defaultOutputFile, "Path to the JSON output file")
+	fs.StringVar(&cfg.Manifest, "manifest", "", "Path to a collection manifest JSON file to create or update with what this run captured")
+	fs.StringVar(&cfg.ManifestTable, "manifest-table", "", "Table name recorded in -manifest for -query or -query-file results")
 	fs.BoolVar(&cfg.ADXExport, "adx-export", false, "Also write Azure Data Explorer ingestion artifacts")
 	fs.BoolVar(&cfg.OpenGraphExport, "opengraph-export", false, "Also write a BloodHound OpenGraph JSON payload")
 	fs.StringVar(&cfg.ADXCluster, "adx-cluster", envOrDotEnvAny(dotenv, "ADX_CLUSTER"), "ADX cluster URI, for example https://<cluster>.<region>.kusto.windows.net")
@@ -116,6 +133,7 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	fs.BoolVar(&cfg.Pseudonymize, "pseudonymize", false, "Pseudonymize identifiers with embedded NER before writing collected data")
 	fs.BoolVar(&cfg.PseudonymizeFilenames, "pseudonymize-filenames", false, "Also pseudonymize linked filenames in file, path, and process command-line fields")
 	fs.StringVar(&cfg.PseudonymMap, "pseudonym-map", "", "Path to a reusable pseudonym mapping file (a secure temporary file is created when omitted)")
+	fs.BoolVar(&cfg.PseudonymMapIrreversible, "pseudonym-map-irreversible", false, "Create a pseudonym mapping file that stores keyed hashes instead of original values")
 	fs.StringVar(&cfg.PseudonymFields, "pseudonym-fields", envOrDotEnvAny(dotenv, "PSEUDONYM_FIELDS"), "Override the built-in table field allowlist; comma-separated with * and ? wildcards")
 	fs.StringVar(&cfg.PseudonymReplacementsFile, "pseudonym-replacements-file", envOrDotEnvAny(dotenv, "PSEUDONYM_REPLACEMENTS_FILE"), "Path to a JSON file of literal word and phrase replacements")
 	fs.StringVar(&cfg.PseudonymMapRetention, "pseudonym-map-retention", "keep", "Mapping file retention after collection: keep or delete")
@@ -146,6 +164,22 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 		return cfg, err
 	}
 
+	cfg.Source = strings.ToLower(strings.TrimSpace(cfg.Source))
+	switch cfg.Source {
+	case sourceDefender, sourceLogAnalytics:
+	default:
+		return cfg, fmt.Errorf("unsupported -source value %q; expected defender or loganalytics", cfg.Source)
+	}
+	if cfg.Source == sourceLogAnalytics {
+		timeColumnSet := false
+		fs.Visit(func(f *flag.Flag) {
+			timeColumnSet = timeColumnSet || f.Name == "dump-time-column"
+		})
+		if !timeColumnSet {
+			cfg.DumpTimeColumn = logAnalyticsTimeColumn
+		}
+	}
+
 	cfg.AuthMode = strings.ToLower(strings.TrimSpace(cfg.AuthMode))
 	switch cfg.AuthMode {
 	case "auto", "sp", "azcli", "none":
@@ -155,6 +189,9 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 
 	cfg.Endpoint = strings.TrimRight(strings.TrimSpace(cfg.Endpoint), "/")
 	cfg.Resource = strings.TrimRight(strings.TrimSpace(cfg.Resource), "/")
+	cfg.WorkspaceID = strings.TrimSpace(cfg.WorkspaceID)
+	cfg.LogAnalyticsEndpoint = strings.TrimRight(strings.TrimSpace(cfg.LogAnalyticsEndpoint), "/")
+	cfg.LogAnalyticsResource = strings.TrimRight(strings.TrimSpace(cfg.LogAnalyticsResource), "/")
 	cfg.LoginBaseURL = strings.TrimRight(strings.TrimSpace(cfg.LoginBaseURL), "/")
 	cfg.DumpTable = strings.TrimSpace(cfg.DumpTable)
 	cfg.DumpLookback = strings.TrimSpace(cfg.DumpLookback)
@@ -174,6 +211,8 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	cfg.PseudonymFields = strings.TrimSpace(cfg.PseudonymFields)
 	cfg.PseudonymReplacementsFile = strings.TrimSpace(cfg.PseudonymReplacementsFile)
 	cfg.PseudonymMapRetention = strings.ToLower(strings.TrimSpace(cfg.PseudonymMapRetention))
+	cfg.Manifest = strings.TrimSpace(cfg.Manifest)
+	cfg.ManifestTable = strings.TrimSpace(cfg.ManifestTable)
 	if cfg.ADXResource == "" {
 		cfg.ADXResource = defaultADXResource
 	}
@@ -196,6 +235,20 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	}
 	if cfg.LoginBaseURL == "" {
 		return cfg, errors.New("login base URL must not be empty")
+	}
+	if cfg.Source == sourceLogAnalytics && (cfg.DumpTable != "" || hasQueryInput(cfg)) {
+		if cfg.WorkspaceID == "" {
+			return cfg, errors.New("-source loganalytics requires -workspace-id or LOG_ANALYTICS_WORKSPACE_ID")
+		}
+		if !isExactGUID(cfg.WorkspaceID) {
+			return cfg, fmt.Errorf("invalid -workspace-id value %q; use the workspace ID GUID, not the resource ID or name", cfg.WorkspaceID)
+		}
+		if cfg.LogAnalyticsEndpoint == "" {
+			return cfg, errors.New("la endpoint must not be empty")
+		}
+		if cfg.LogAnalyticsResource == "" {
+			return cfg, errors.New("la resource must not be empty")
+		}
 	}
 	if cfg.ADXBatchSize <= 0 {
 		return cfg, errors.New("adx batch size must be greater than zero")
@@ -262,6 +315,9 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	if !cfg.Pseudonymize && cfg.PseudonymMap != "" {
 		return cfg, errors.New("-pseudonym-map requires -pseudonymize")
 	}
+	if !cfg.Pseudonymize && cfg.PseudonymMapIrreversible {
+		return cfg, errors.New("-pseudonym-map-irreversible requires -pseudonymize")
+	}
 	if cfg.PseudonymizeFilenames && !cfg.Pseudonymize {
 		return cfg, errors.New("-pseudonymize-filenames requires -pseudonymize")
 	}
@@ -290,6 +346,35 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 		}
 		if cfg.PseudonymReplacementsFile != "" && samePath(cfg.PseudonymReplacementsFile, artifactPath) {
 			return cfg, fmt.Errorf("-pseudonym-replacements-file must not use an output artifact path: %s", artifactPath)
+		}
+	}
+	if cfg.ManifestTable != "" && cfg.Manifest == "" {
+		return cfg, errors.New("-manifest-table requires -manifest")
+	}
+	if cfg.Manifest != "" {
+		switch {
+		case cfg.DumpTable == "" && !hasQueryInput(cfg):
+			return cfg, errors.New("-manifest requires -query, -query-file, or -dump-table")
+		case cfg.DumpTable != "" && cfg.ManifestTable != "":
+			return cfg, errors.New("-manifest-table is only used with -query or -query-file; -dump-table records its own table name")
+		case hasQueryInput(cfg) && cfg.ManifestTable == "":
+			return cfg, errors.New("-manifest with -query or -query-file requires -manifest-table")
+		case cfg.ManifestTable != "" && !isSafeADXIdentifier(cfg.ManifestTable):
+			return cfg, fmt.Errorf("invalid -manifest-table value %q; use only letters, numbers, and underscores, starting with a letter or underscore", cfg.ManifestTable)
+		}
+		for _, other := range []struct{ flag, path string }{
+			{"-pseudonym-map", cfg.PseudonymMap},
+			{"-pseudonym-replacements-file", cfg.PseudonymReplacementsFile},
+			{"-query-file", strings.TrimSpace(cfg.QueryFile)},
+		} {
+			if other.path != "" && samePath(cfg.Manifest, other.path) {
+				return cfg, fmt.Errorf("-manifest and %s must use different paths", other.flag)
+			}
+		}
+		for _, artifactPath := range artifactPaths {
+			if samePath(cfg.Manifest, artifactPath) {
+				return cfg, fmt.Errorf("-manifest must not use an output artifact path: %s", artifactPath)
+			}
 		}
 	}
 	switch cfg.PseudonymMapRetention {
@@ -464,6 +549,12 @@ func mdeAuthConfig(cfg config) authConfig {
 		Resource:     cfg.Resource,
 		LoginBaseURL: cfg.LoginBaseURL,
 	}
+}
+
+func logAnalyticsAuthConfig(cfg config) authConfig {
+	auth := mdeAuthConfig(cfg)
+	auth.Resource = cfg.LogAnalyticsResource
+	return auth
 }
 
 func adxAuthConfig(cfg config) authConfig {

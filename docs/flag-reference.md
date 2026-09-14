@@ -4,18 +4,24 @@ This page lists every flag registered by the application. Follow the guide link 
 
 | Flag | Value | Default or environment | Purpose | Guide |
 |---|---|---|---|---|
-| `--auth` | `auto`, `sp`, `azcli`, `none` | `auto` | Select token acquisition mode for Graph and ADX actions. | [Authentication](authentication-and-networking.md#--auth) |
-| `--tenant-id` | string | `AZURE_TENANT_ID` | Microsoft Entra tenant for Defender/Graph authentication. | [Authentication](authentication-and-networking.md#--tenant-id) |
-| `--client-id` | string | `AZURE_CLIENT_ID` | Service-principal application ID for Defender/Graph. | [Authentication](authentication-and-networking.md#--client-id) |
-| `--client-secret` | string | `AZURE_CLIENT_SECRET` | Service-principal secret for Defender/Graph. | [Authentication](authentication-and-networking.md#--client-secret) |
-| `--query` | KQL string | empty | Run an inline Defender XDR advanced hunting query. | [Queries](queries-and-dumps.md#--query) |
-| `--query-file` | path | empty | Read the Defender XDR query from a UTF-8 text file. | [Queries](queries-and-dumps.md#--query-file) |
-| `--dump-table` | identifier | empty | Collect a whole advanced hunting table over a lookback window. | [Table dumps](queries-and-dumps.md#--dump-table) |
+| `--source` | `defender`, `loganalytics` | `defender` | Select Defender XDR advanced hunting or a Log Analytics (Microsoft Sentinel) workspace as the query source. | [Sources](queries-and-dumps.md#--source) |
+| `--workspace-id` | GUID | `LOG_ANALYTICS_WORKSPACE_ID` | Log Analytics workspace queried by `--source loganalytics`. | [Log Analytics](authentication-and-networking.md#--workspace-id) |
+| `--la-endpoint` | URI | `https://api.loganalytics.azure.com/v1` | Override the Log Analytics query API base URL. | [Networking](authentication-and-networking.md#--la-endpoint) |
+| `--la-resource` | URI | `https://api.loganalytics.io` | Override the Log Analytics OAuth audience. | [Networking](authentication-and-networking.md#--la-resource) |
+| `--auth` | `auto`, `sp`, `azcli`, `none` | `auto` | Select token acquisition mode for Graph, Log Analytics, and ADX actions. | [Authentication](authentication-and-networking.md#--auth) |
+| `--tenant-id` | string | `AZURE_TENANT_ID` | Microsoft Entra tenant for Defender/Graph and Log Analytics authentication. | [Authentication](authentication-and-networking.md#--tenant-id) |
+| `--client-id` | string | `AZURE_CLIENT_ID` | Service-principal application ID for Defender/Graph and Log Analytics. | [Authentication](authentication-and-networking.md#--client-id) |
+| `--client-secret` | string | `AZURE_CLIENT_SECRET` | Service-principal secret for Defender/Graph and Log Analytics. | [Authentication](authentication-and-networking.md#--client-secret) |
+| `--query` | KQL string | empty | Run an inline KQL query against the selected source. | [Queries](queries-and-dumps.md#--query) |
+| `--query-file` | path | empty | Read the KQL query from a UTF-8 text file. | [Queries](queries-and-dumps.md#--query-file) |
+| `--dump-table` | identifier | empty | Collect a whole advanced hunting or Log Analytics table over a lookback window. | [Table dumps](queries-and-dumps.md#--dump-table) |
 | `--dump-lookback` | KQL timespan | `30d` | Set the time window for a table dump. | [Table dumps](queries-and-dumps.md#--dump-lookback) |
-| `--dump-time-column` | identifier | `Timestamp` | Select the table column used for lookback filtering. | [Table dumps](queries-and-dumps.md#--dump-time-column) |
+| `--dump-time-column` | identifier | `Timestamp`; `TimeGenerated` for `loganalytics` | Select the table column used for lookback filtering. | [Table dumps](queries-and-dumps.md#--dump-time-column) |
 | `--dump-row-limit` | positive integer | `30000` | Set the query and table-dump threshold that triggers hash partitioning. | [Queries and dumps](queries-and-dumps.md#--dump-row-limit) |
 | `--dump-parallelism` | positive integer | `1` | Deprecated compatibility option; requests remain sequential. | [Table dumps](queries-and-dumps.md#--dump-parallelism) |
 | `--output` | path | `results.json` | Set the main Defender query or dump output path. | [Output](queries-and-dumps.md#--output) |
+| `--manifest` | path | empty | Create or update a collection manifest recording what each query or table dump captured. | [Manifest](queries-and-dumps.md#--manifest) |
+| `--manifest-table` | identifier | empty; required for query input with `--manifest` | Name recorded in the manifest for a query result. | [Manifest](queries-and-dumps.md#--manifest-table) |
 | `--adx-export` | boolean | `false` | Generate ADX NDJSON and KQL sidecars for collected results. | [ADX export](azure-data-explorer.md#--adx-export) |
 | `--opengraph-export` | boolean | `false` | Generate BloodHound OpenGraph and icon sidecars. | [OpenGraph](bloodhound-and-opengraph.md#--opengraph-export) |
 | `--adx-cluster` | URI | `ADX_CLUSTER` | ADX engine cluster used for direct upload. | [ADX upload](azure-data-explorer.md#--adx-cluster) |
@@ -39,6 +45,7 @@ This page lists every flag registered by the application. Follow the guide link 
 | `--pseudonymize` | boolean | `false` | Pseudonymize selected fields before collected data is written. | [Pseudonymization](pseudonymization.md#--pseudonymize) |
 | `--pseudonymize-filenames` | boolean | `false` | Pseudonymize filenames and keep matching path/command-line references linked. | [Filename linking](pseudonymization.md#--pseudonymize-filenames) |
 | `--pseudonym-map` | path | secure temporary file | Set a reusable, sensitive pseudonym mapping vault. | [Mapping vault](pseudonymization.md#--pseudonym-map) |
+| `--pseudonym-map-irreversible` | boolean | `false` | Create a mapping vault that stores keyed hashes instead of original values. | [Irreversible vault](pseudonymization.md#--pseudonym-map-irreversible) |
 | `--pseudonym-fields` | comma-separated patterns | `PSEUDONYM_FIELDS`, then built-in table policy | Override the selected-column allowlist. | [Field policy](pseudonymization.md#--pseudonym-fields) |
 | `--pseudonym-replacements-file` | path | `PSEUDONYM_REPLACEMENTS_FILE` | Load configured literal replacements from JSON. | [Replacements](pseudonymization.md#--pseudonym-replacements-file) |
 | `--pseudonym-map-retention` | `keep`, `delete` | `keep` | Choose what happens to the mapping vault after collection. This is non-interactive. | [Retention](pseudonymization.md#--pseudonym-map-retention) |

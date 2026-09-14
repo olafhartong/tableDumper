@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 )
 
 func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
@@ -35,7 +36,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 				return err
 			}
 		}
-		pseudonyms, err = newPseudonymizer(cfg.PseudonymMap)
+		pseudonyms, err = openPseudonymizer(cfg.PseudonymMap, cfg.PseudonymMapIrreversible)
 		if err != nil {
 			return err
 		}
@@ -44,6 +45,12 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		}
 		pseudonyms.ConfigureFilenamePseudonymization(cfg.PseudonymizeFilenames)
 		fmt.Fprintf(stderr, "[i] pseudonymization enabled; secure mapping file: %s\n", pseudonyms.Path())
+		if pseudonyms.Irreversible() {
+			fmt.Fprintln(stderr, "[i] irreversible mapping file: original values are stored only as keyed hashes.")
+			if !cfg.PseudonymMapIrreversible {
+				fmt.Fprintln(stderr, "[i] the existing mapping file is irreversible, so it stays irreversible without -pseudonym-map-irreversible.")
+			}
+		}
 		if cfg.PseudonymizeFilenames {
 			fmt.Fprintln(stderr, "[i] linked filename pseudonymization enabled for filename, path, and process command-line fields.")
 		}
@@ -65,20 +72,33 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		}
 	}
 
+	var manifest *manifestRun
+	if cfg.Manifest != "" {
+		if manifest, err = openManifestRun(cfg.Manifest, pseudonyms); err != nil {
+			return err
+		}
+	}
+
 	if hasQueryInput(cfg) {
 		query, err := readQuery(cfg.Query, cfg.QueryFile)
 		if err != nil {
 			return err
 		}
+		record := manifestResult{sourceName: cfg.Source, table: cfg.ManifestTable, query: query, outputPath: cfg.Output}
 
-		token, authMode, err := acquireToken(ctx, httpClient, mdeAuthConfig(cfg))
+		source, authMode, err := newQuerySource(ctx, httpClient, cfg)
 		if err != nil {
-			return err
+			record.err = err
+			return manifest.Record(record)
 		}
 
-		output, err := dumpQuery(ctx, httpClient, cfg, token, query, pseudonyms, stderr)
-		if err != nil {
+		output, err := dumpQuery(ctx, source, cfg, query, pseudonyms, stderr)
+		record.source, record.output, record.err = source, output, err
+		if err := manifest.Record(record); err != nil {
 			return err
+		}
+		if manifest != nil {
+			fmt.Fprintf(stderr, "[i] recorded %s in manifest %s\n", cfg.ManifestTable, cfg.Manifest)
 		}
 
 		message := fmt.Sprintf("[=] Done. Wrote %d rows to %s using %s authentication", output.Rows, cfg.Output, authMode)
@@ -117,14 +137,21 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 
 	if cfg.DumpTable != "" {
-		token, authMode, err := acquireToken(ctx, httpClient, mdeAuthConfig(cfg))
+		cutoff := time.Now().UTC()
+		record := manifestResult{sourceName: cfg.Source, table: cfg.DumpTable, timeColumn: cfg.DumpTimeColumn, lookback: cfg.DumpLookback, cutoff: cutoff, outputPath: cfg.Output}
+		source, authMode, err := newQuerySource(ctx, httpClient, cfg)
 		if err != nil {
-			return err
+			record.err = err
+			return manifest.Record(record)
 		}
 
-		output, err := dumpTable(ctx, httpClient, cfg, token, pseudonyms, stderr)
-		if err != nil {
+		output, err := dumpTableAt(ctx, source, cfg, cutoff, pseudonyms, stderr)
+		record.source, record.output, record.err = source, output, err
+		if err := manifest.Record(record); err != nil {
 			return err
+		}
+		if manifest != nil {
+			fmt.Fprintf(stderr, "[i] recorded %s in manifest %s\n", cfg.DumpTable, cfg.Manifest)
 		}
 
 		message := fmt.Sprintf("[=] Done! Dumped %d rows from %s over %s to %s using %s authentication", output.Rows, cfg.DumpTable, cfg.DumpLookback, cfg.Output, authMode)

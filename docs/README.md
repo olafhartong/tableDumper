@@ -5,8 +5,8 @@ This directory is the detailed command-line reference for `tableDumper`. The roo
 ## Guides
 
 - [Complete flag reference](flag-reference.md) — one table covering every command-line flag
-- [Queries and table dumps](queries-and-dumps.md) — query input, whole-table collection, partitioning, and output
-- [Authentication and networking](authentication-and-networking.md) — Microsoft Graph, Azure CLI, service principals, dotenv, endpoints, TLS, and timeouts
+- [Queries and table dumps](queries-and-dumps.md) — query sources, query input, whole-table collection, partitioning, and output
+- [Authentication and networking](authentication-and-networking.md) — Microsoft Graph, Log Analytics, Azure CLI, service principals, dotenv, endpoints, TLS, and timeouts
 - [Pseudonymization](pseudonymization.md) — field policies, mapping vaults, configured replacements, and retention
 - [Azure Data Explorer](azure-data-explorer.md) — ADX artifact export and direct upload
 - [BloodHound and OpenGraph](bloodhound-and-opengraph.md) — OpenGraph generation, authentication, graph upload, and custom icons
@@ -15,8 +15,10 @@ This directory is the detailed command-line reference for `tableDumper`. The roo
 
 At least one action must be requested:
 
-1. Run one Defender XDR query with `--query` or `--query-file`.
-2. Dump one Defender XDR table with `--dump-table`.
+1. Run one query with `--query` or `--query-file`.
+2. Dump one table with `--dump-table`.
+
+Queries and table dumps read from Defender XDR advanced hunting by default, or from a Log Analytics (Microsoft Sentinel) workspace with `--source loganalytics`.
 3. Upload an existing file to ADX with `--adx-upload-file`.
 4. Upload an existing graph or icon file with `--bloodhound-upload-file` or `--bloodhound-upload-icons-file`.
 

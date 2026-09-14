@@ -26,7 +26,15 @@ import (
 	"github.com/jdkato/prose/v3"
 )
 
-const pseudonymVaultVersion = 1
+const (
+	pseudonymVaultVersion = 1
+	// Irreversible vaults use a newer version so older binaries refuse them
+	// instead of discarding hashed entries as empty legacy mappings.
+	irreversiblePseudonymVaultVersion = 2
+	irreversiblePseudonymVaultMode    = "irreversible"
+	pseudonymVaultKeyContext          = "tabledumper-vault-key-v1"
+	pseudonymKeyIDContext             = "tabledumper-key-id-v1"
+)
 
 type entityKind string
 
@@ -51,15 +59,18 @@ const (
 )
 
 type pseudonymMapping struct {
-	EntityType string `json:"entity_type"`
-	Original   string `json:"original"`
-	Pseudonym  string `json:"pseudonym"`
-	AliasOf    string `json:"alias_of,omitempty"`
+	EntityType   string `json:"entity_type"`
+	Original     string `json:"original,omitempty"`
+	OriginalHMAC string `json:"original_hmac,omitempty"`
+	Pseudonym    string `json:"pseudonym"`
+	AliasOf      string `json:"alias_of,omitempty"`
 }
 
 type pseudonymVault struct {
 	Version   int                `json:"version"`
+	Mode      string             `json:"mode,omitempty"`
 	Seed      string             `json:"seed"`
+	KeyID     string             `json:"key_id,omitempty"`
 	CreatedAt time.Time          `json:"created_at"`
 	UpdatedAt time.Time          `json:"updated_at"`
 	Mappings  []pseudonymMapping `json:"mappings"`
@@ -69,6 +80,7 @@ type pseudonymizer struct {
 	mu                    sync.Mutex
 	path                  string
 	seed                  []byte
+	irreversible          bool
 	createdAt             time.Time
 	mappings              map[string]pseudonymMapping
 	used                  map[string]string
@@ -182,6 +194,13 @@ var domainFileExtensions = map[string]struct{}{
 }
 
 func newPseudonymizer(path string) (*pseudonymizer, error) {
+	return openPseudonymizer(path, false)
+}
+
+// openPseudonymizer creates an irreversible vault when requested. The mode of an
+// existing vault is authoritative: an irreversible vault never becomes
+// reversible, and a reversible vault is never migrated silently.
+func openPseudonymizer(path string, irreversible bool) (*pseudonymizer, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		file, err := os.CreateTemp("", "tabledumper-pseudonyms-*.json")
@@ -209,7 +228,7 @@ func newPseudonymizer(path string) (*pseudonymizer, error) {
 		textCache:   make(map[string]string),
 		fieldPolicy: fieldPolicy,
 	}
-	if err := p.loadOrCreate(); err != nil {
+	if err := p.loadOrCreate(irreversible); err != nil {
 		return nil, err
 	}
 	return p, nil
@@ -246,7 +265,7 @@ func (p *pseudonymizer) shouldPseudonymizeField(field string) bool {
 	return policy.Matches(field)
 }
 
-func (p *pseudonymizer) loadOrCreate() error {
+func (p *pseudonymizer) loadOrCreate(irreversible bool) error {
 	body, err := os.ReadFile(p.path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -256,6 +275,7 @@ func (p *pseudonymizer) loadOrCreate() error {
 		if _, err := rand.Read(p.seed); err != nil {
 			return fmt.Errorf("generate pseudonym mapping seed: %w", err)
 		}
+		p.irreversible = irreversible
 		p.createdAt = time.Now().UTC()
 		return p.Save()
 	}
@@ -264,21 +284,39 @@ func (p *pseudonymizer) loadOrCreate() error {
 	if err := json.Unmarshal(body, &vault); err != nil {
 		return fmt.Errorf("decode pseudonym mapping file %s: %w", p.path, err)
 	}
-	if vault.Version != pseudonymVaultVersion {
+	switch {
+	case vault.Version == pseudonymVaultVersion && vault.Mode == "":
+	case vault.Version == irreversiblePseudonymVaultVersion && vault.Mode == irreversiblePseudonymVaultMode:
+		p.irreversible = true
+	case vault.Version == pseudonymVaultVersion || vault.Version == irreversiblePseudonymVaultVersion:
+		return fmt.Errorf("unsupported pseudonym mapping mode %q for version %d in %s", vault.Mode, vault.Version, p.path)
+	default:
 		return fmt.Errorf("unsupported pseudonym mapping version %d in %s", vault.Version, p.path)
+	}
+	if irreversible && !p.irreversible {
+		return fmt.Errorf("pseudonym mapping file %s is reversible and cannot be converted to an irreversible vault; use a new -pseudonym-map path", p.path)
 	}
 	seed, err := base64.StdEncoding.DecodeString(vault.Seed)
 	if err != nil || len(seed) < 32 {
 		return fmt.Errorf("invalid pseudonym mapping seed in %s", p.path)
 	}
 	p.seed = seed
+	if vault.KeyID != "" && vault.KeyID != p.KeyID() {
+		return fmt.Errorf("pseudonym mapping key_id in %s does not match its seed", p.path)
+	}
 	p.createdAt = vault.CreatedAt
 	if p.createdAt.IsZero() {
 		p.createdAt = time.Now().UTC()
 	}
 	for index, mapping := range vault.Mappings {
 		kind := entityKind(mapping.EntityType)
-		if strings.TrimSpace(mapping.Original) == "" || strings.TrimSpace(mapping.Pseudonym) == "" {
+		if p.irreversible {
+			if mapping.Original != "" || !isVaultKeyDigest(mapping.OriginalHMAC) || strings.TrimSpace(mapping.Pseudonym) == "" {
+				return fmt.Errorf("invalid pseudonym mapping entry %d in %s: irreversible entries require original_hmac, a pseudonym, and no original", index+1, p.path)
+			}
+		} else if mapping.OriginalHMAC != "" {
+			return fmt.Errorf("invalid pseudonym mapping entry %d in %s: original_hmac is only valid in irreversible vaults", index+1, p.path)
+		} else if strings.TrimSpace(mapping.Original) == "" || strings.TrimSpace(mapping.Pseudonym) == "" {
 			p.discardedMappings++
 			continue
 		}
@@ -286,7 +324,13 @@ func (p *pseudonymizer) loadOrCreate() error {
 			return fmt.Errorf("invalid pseudonym mapping entry %d in %s: unsupported entity_type %q", index+1, p.path, mapping.EntityType)
 		}
 		key := entityKey(kind, mapping.Original)
+		if p.irreversible {
+			key = string(kind) + "\x00" + mapping.OriginalHMAC
+		}
 		if existing, ok := p.mappings[key]; ok && existing.Pseudonym != mapping.Pseudonym {
+			if p.irreversible {
+				return fmt.Errorf("conflicting pseudonym mapping entry %d in %s for %s value: %q and %q", index+1, p.path, mapping.EntityType, existing.Pseudonym, mapping.Pseudonym)
+			}
 			return fmt.Errorf("conflicting pseudonym mapping entry %d in %s for %s value %q: %q and %q", index+1, p.path, mapping.EntityType, mapping.Original, existing.Pseudonym, mapping.Pseudonym)
 		}
 		p.mappings[key] = mapping
@@ -347,7 +391,7 @@ func (p *pseudonymizer) ConfigureWordReplacements(replacements *wordReplacementS
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for _, rule := range replacements.rules {
-		if mapping, ok := p.mappings[entityKey(entityConfigured, rule.find)]; ok && mapping.Pseudonym != rule.replacement {
+		if mapping, ok := p.mappings[p.vaultKey(entityConfigured, rule.find)]; ok && mapping.Pseudonym != rule.replacement {
 			return errors.New("configured word replacement conflicts with the existing pseudonym mapping file; restore the previous replacement or use a new mapping file")
 		}
 	}
@@ -358,6 +402,20 @@ func (p *pseudonymizer) ConfigureWordReplacements(replacements *wordReplacementS
 
 func (p *pseudonymizer) Path() string {
 	return p.path
+}
+
+// Irreversible reports whether the vault stores keyed hashes instead of
+// original values.
+func (p *pseudonymizer) Irreversible() bool {
+	return p.irreversible
+}
+
+// KeyID identifies the vault seed without revealing it, so collection records
+// can be matched to the vault that produced them.
+func (p *pseudonymizer) KeyID() string {
+	hash := hmac.New(sha256.New, p.seed)
+	hash.Write([]byte(pseudonymKeyIDContext))
+	return hex.EncodeToString(hash.Sum(nil))[:16]
 }
 
 func (p *pseudonymizer) MappingCount() int {
@@ -394,6 +452,9 @@ func (p *pseudonymizer) saveLocked() error {
 	}
 	sort.Slice(mappings, func(i, j int) bool {
 		if mappings[i].EntityType == mappings[j].EntityType {
+			if p.irreversible {
+				return mappings[i].OriginalHMAC < mappings[j].OriginalHMAC
+			}
 			return strings.ToLower(mappings[i].Original) < strings.ToLower(mappings[j].Original)
 		}
 		return mappings[i].EntityType < mappings[j].EntityType
@@ -401,9 +462,14 @@ func (p *pseudonymizer) saveLocked() error {
 	vault := pseudonymVault{
 		Version:   pseudonymVaultVersion,
 		Seed:      base64.StdEncoding.EncodeToString(p.seed),
+		KeyID:     p.KeyID(),
 		CreatedAt: p.createdAt,
 		UpdatedAt: time.Now().UTC(),
 		Mappings:  mappings,
+	}
+	if p.irreversible {
+		vault.Version = irreversiblePseudonymVaultVersion
+		vault.Mode = irreversiblePseudonymVaultMode
 	}
 	body, err := json.MarshalIndent(vault, "", "  ")
 	if err != nil {
@@ -602,7 +668,7 @@ func (p *pseudonymizer) primeIdentityAliases(row map[string]any) {
 				continue
 			}
 			fakeName := ""
-			if mapping, ok := p.mappings[entityKey(entityPerson, person.value)]; ok {
+			if mapping, ok := p.mappings[p.vaultKey(entityPerson, person.value)]; ok {
 				fakeName = mapping.Pseudonym
 			}
 			if fakeName == "" {
@@ -610,12 +676,12 @@ func (p *pseudonymizer) primeIdentityAliases(row map[string]any) {
 				if alias.kind == entityEmail {
 					usernameOriginal, _, _ = strings.Cut(alias.value, "@")
 				}
-				if mapping, ok := p.mappings[entityKey(entityUsername, usernameOriginal)]; ok {
+				if mapping, ok := p.mappings[p.vaultKey(entityUsername, usernameOriginal)]; ok {
 					fakeName = displayNameFromUsername(mapping.Pseudonym)
 				}
 			}
 			if fakeName == "" && alias.kind == entityEmail {
-				if mapping, ok := p.mappings[entityKey(entityEmail, alias.value)]; ok {
+				if mapping, ok := p.mappings[p.vaultKey(entityEmail, alias.value)]; ok {
 					local, _, _ := strings.Cut(mapping.Pseudonym, "@")
 					fakeName = displayNameFromUsername(local)
 				}
@@ -1225,11 +1291,11 @@ func overlapsRecognizedEntity(candidate recognizedEntity, selected []recognizedE
 func (p *pseudonymizer) configuredReplacement(original, replacement string) string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	key := entityKey(entityConfigured, original)
+	key := p.vaultKey(entityConfigured, original)
 	if mapping, ok := p.mappings[key]; ok {
 		return mapping.Pseudonym
 	}
-	p.mappings[key] = pseudonymMapping{EntityType: string(entityConfigured), Original: original, Pseudonym: replacement}
+	p.mappings[key] = p.newMapping(entityConfigured, original, key, replacement)
 	if _, exists := p.used[strings.ToLower(replacement)]; !exists {
 		p.used[strings.ToLower(replacement)] = key
 	}
@@ -1249,7 +1315,7 @@ func (p *pseudonymizer) replacementLocked(kind entityKind, original string) stri
 	if strings.TrimSpace(original) == "" {
 		return original
 	}
-	key := entityKey(kind, original)
+	key := p.vaultKey(kind, original)
 	if mapping, ok := p.mappings[key]; ok {
 		return mapping.Pseudonym
 	}
@@ -1300,7 +1366,7 @@ func (p *pseudonymizer) replacementLocked(kind entityKind, original string) stri
 			break
 		}
 	}
-	mapping := pseudonymMapping{EntityType: string(kind), Original: original, Pseudonym: candidate}
+	mapping := p.newMapping(kind, original, key, candidate)
 	p.mappings[key] = mapping
 	p.used[strings.ToLower(candidate)] = key
 	return candidate
@@ -1328,7 +1394,7 @@ func (p *pseudonymizer) forceReplacementLocked(kind entityKind, original, candid
 	if p.transformationError != nil {
 		return ""
 	}
-	key := entityKey(kind, original)
+	key := p.vaultKey(kind, original)
 	if mapping, ok := p.mappings[key]; ok {
 		return mapping.Pseudonym
 	}
@@ -1355,7 +1421,7 @@ func (p *pseudonymizer) forceReplacementLocked(kind entityKind, original, candid
 			candidate = fmt.Sprintf("%s%d", base, suffix)
 		}
 	}
-	mapping := pseudonymMapping{EntityType: string(kind), Original: original, Pseudonym: candidate}
+	mapping := p.newMapping(kind, original, key, candidate)
 	p.mappings[key] = mapping
 	p.used[strings.ToLower(candidate)] = key
 	return candidate
@@ -1364,6 +1430,43 @@ func (p *pseudonymizer) forceReplacementLocked(kind entityKind, original, candid
 func entityKey(kind entityKind, original string) string {
 	canonical := strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(original))), " ")
 	return string(kind) + "\x00" + canonical
+}
+
+// vaultKey addresses p.mappings and p.used. Pseudonym generation always uses
+// entityKey, so both vault modes produce identical pseudonyms for one seed. The
+// kind prefix is kept because relationship checks parse it from stored keys.
+func (p *pseudonymizer) vaultKey(kind entityKind, original string) string {
+	key := entityKey(kind, original)
+	if !p.irreversible {
+		return key
+	}
+	hash := hmac.New(sha256.New, p.seed)
+	hash.Write([]byte(pseudonymVaultKeyContext))
+	hash.Write([]byte{0})
+	hash.Write([]byte(key[len(kind)+1:]))
+	return string(kind) + "\x00" + hex.EncodeToString(hash.Sum(nil))
+}
+
+func (p *pseudonymizer) newMapping(kind entityKind, original, key, pseudonym string) pseudonymMapping {
+	mapping := pseudonymMapping{EntityType: string(kind), Pseudonym: pseudonym}
+	if p.irreversible {
+		mapping.OriginalHMAC = key[len(kind)+1:]
+	} else {
+		mapping.Original = original
+	}
+	return mapping
+}
+
+func isVaultKeyDigest(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *pseudonymizer) generateCandidate(kind entityKind, original string, attempt int) string {
