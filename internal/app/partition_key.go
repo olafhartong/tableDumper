@@ -62,7 +62,7 @@ func partitionScalarType(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "string":
 		return "string"
-	case "bool", "boolean":
+	case "bool", "boolean", "sbyte":
 		return "bool"
 	case "int", "int32":
 		return "int"
@@ -70,7 +70,7 @@ func partitionScalarType(value string) string {
 		return "long"
 	case "real", "double":
 		return "real"
-	case "decimal":
+	case "decimal", "sqldecimal":
 		return "decimal"
 	case "datetime":
 		return "datetime"
