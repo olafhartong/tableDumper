@@ -224,7 +224,7 @@ func linkedIdentityFallbackSource(profile *linkedIdentityProfile) string {
 
 func (p *pseudonymizer) existingLinkedUsernameLocked(profile *linkedIdentityProfile) string {
 	for _, original := range profile.usernames {
-		if mapping, ok := p.mappings[entityKey(entityUsername, original)]; ok {
+		if mapping, ok := p.mappings[p.vaultKey(entityUsername, original)]; ok {
 			candidate := mapping.Pseudonym
 			if _, username, composite := splitWindowsAccount(candidate); composite {
 				candidate = username
@@ -234,20 +234,20 @@ func (p *pseudonymizer) existingLinkedUsernameLocked(profile *linkedIdentityProf
 			}
 		}
 		if _, username, composite := splitWindowsAccount(original); composite {
-			if mapping, ok := p.mappings[entityKey(entityUsername, username)]; ok {
+			if mapping, ok := p.mappings[p.vaultKey(entityUsername, username)]; ok {
 				return mapping.Pseudonym
 			}
 		}
 	}
 	for _, original := range profile.emails {
-		if mapping, ok := p.mappings[entityKey(entityEmail, original)]; ok {
+		if mapping, ok := p.mappings[p.vaultKey(entityEmail, original)]; ok {
 			if local, _, ok := splitEmail(mapping.Pseudonym); ok {
 				return local
 			}
 		}
 	}
 	for _, original := range profile.people {
-		if mapping, ok := p.mappings[entityKey(entityPerson, original)]; ok {
+		if mapping, ok := p.mappings[p.vaultKey(entityPerson, original)]; ok {
 			return usernameFromDisplayName(mapping.Pseudonym)
 		}
 	}
@@ -256,12 +256,12 @@ func (p *pseudonymizer) existingLinkedUsernameLocked(profile *linkedIdentityProf
 
 func (p *pseudonymizer) existingLinkedDomainLocked(profile *linkedIdentityProfile) string {
 	for _, original := range profile.domains {
-		if mapping, ok := p.mappings[entityKey(entityDomain, original)]; ok {
+		if mapping, ok := p.mappings[p.vaultKey(entityDomain, original)]; ok {
 			return mapping.Pseudonym
 		}
 	}
 	for _, original := range profile.emails {
-		if mapping, ok := p.mappings[entityKey(entityEmail, original)]; ok {
+		if mapping, ok := p.mappings[p.vaultKey(entityEmail, original)]; ok {
 			if _, domain, ok := splitEmail(mapping.Pseudonym); ok {
 				return domain
 			}
@@ -374,11 +374,11 @@ func (p *pseudonymizer) linkDeviceProfileLocked(profile *linkedDeviceProfile) {
 	profile.domains = uniqueSortedStrings(profile.domains)
 	fakeHost := ""
 	for _, host := range profile.hosts {
-		if mapping, ok := p.mappings[entityKey(host.mappingKind, host.value)]; ok {
+		if mapping, ok := p.mappings[p.vaultKey(host.mappingKind, host.value)]; ok {
 			fakeHost, _ = splitHostname(mapping.Pseudonym)
 			break
 		}
-		if mapping, ok := p.mappings[entityKey(entityHostname, host.host)]; ok {
+		if mapping, ok := p.mappings[p.vaultKey(entityHostname, host.host)]; ok {
 			fakeHost = mapping.Pseudonym
 			break
 		}
@@ -389,7 +389,7 @@ func (p *pseudonymizer) linkDeviceProfileLocked(profile *linkedDeviceProfile) {
 	fakeDomain := ""
 	if fakeDomain == "" {
 		for _, domain := range profile.domains {
-			if mapping, ok := p.mappings[entityKey(entityDomain, domain)]; ok {
+			if mapping, ok := p.mappings[p.vaultKey(entityDomain, domain)]; ok {
 				fakeDomain = mapping.Pseudonym
 				break
 			}
@@ -451,7 +451,7 @@ func (p *pseudonymizer) forceLinkedReplacementLocked(kind entityKind, original, 
 	if strings.TrimSpace(original) == "" || strings.TrimSpace(candidate) == "" {
 		return original
 	}
-	key := entityKey(kind, original)
+	key := p.vaultKey(kind, original)
 	if mapping, ok := p.mappings[key]; ok && mapping.Pseudonym == candidate {
 		return candidate
 	} else if ok {
@@ -460,7 +460,7 @@ func (p *pseudonymizer) forceLinkedReplacementLocked(kind entityKind, original, 
 		p.transformationError = &pseudonymRelationshipError{Kind: kind}
 		return mapping.Pseudonym
 	}
-	mapping := pseudonymMapping{EntityType: string(kind), Original: original, Pseudonym: candidate}
+	mapping := p.newMapping(kind, original, key, candidate)
 	if owner, exists := p.used[strings.ToLower(candidate)]; exists && owner != key {
 		target := p.mappings[owner]
 		if compatibleLinkedKinds(kind, entityKind(target.EntityType)) {
@@ -510,6 +510,10 @@ func linkedMappingsMaySharePseudonym(key string, mapping pseudonymMapping, other
 	}
 	// Legacy vaults did not record aliases. The exact same FQDN appearing as
 	// both a device name and a domain-typed FQDN is an unambiguous old alias.
+	// Irreversible vaults always record aliases and store no originals.
+	if strings.TrimSpace(mapping.Original) == "" || strings.TrimSpace(other.Original) == "" {
+		return false
+	}
 	_, domain := splitHostname(mapping.Original)
 	return domain != "" && strings.EqualFold(strings.TrimSpace(mapping.Original), strings.TrimSpace(other.Original))
 }

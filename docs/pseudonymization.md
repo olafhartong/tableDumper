@@ -81,7 +81,7 @@ Sets the path of the reusable mapping vault. The vault contains the random seed 
 
 When omitted, the tool creates a secure temporary mapping file and reports its path on stderr. The file is saved atomically with owner-only `0600` permissions.
 
-The vault is sensitive and effectively reversible because it records both original and replacement values. Store it separately from shared results, limit access, and delete it once cross-run consistency is no longer needed.
+The vault is sensitive and effectively reversible because it records both original and replacement values. Store it separately from shared results, limit access, and delete it once cross-run consistency is no longer needed. Use [`--pseudonym-map-irreversible`](#--pseudonym-map-irreversible) when the vault must not contain original values.
 
 Mapping vaults are reusable across collections. When loading a vault written by an older version, unusable entries with an empty original or pseudonym are removed automatically and the cleaned vault is saved atomically; every valid mapping and its relationships are retained. Other invalid entries report their entry number and exact validation problem.
 
@@ -97,6 +97,33 @@ The same original and entity type receive the same pseudonym. Azure subscription
 Friendly names gain a keyed suffix when their short spelling collides, so large collections are not limited to the built-in first/last-name combinations. Existing stored mappings retain their spelling. Allocation is bounded: if an output format runs out of unique values, the collection fails explicitly instead of hanging or reusing a pseudonym. In particular, public IPv4 values use the three documentation ranges (762 usable addresses), while private IPv4 values use `10.203.0.0/16` with 65,024 usable addresses. An exhausted allocation does not publish the current result or save its incomplete mappings; previously completed artifacts remain available.
 
 Related account columns are treated as one identity profile within a record. For example, `AccountName`, `AccountUpn`, and `AccountDomain` (including prefixed variants such as `InitiatingProcessAccount*`) receive a shared pseudonymous username and domain even when the original SAM account and UPN local part differ. The domain part of a composite `DOMAIN\user` value belongs to the profile too, so `CONTOSO\alice` and `CONTOSO\bob` share one pseudonymous domain without a separate domain column. A domain is linked to the profile's shared domain only while it has no mapping of its own; a domain that is already mapped keeps its pseudonym, and each domain-bearing column (`AccountDomain`, the UPN suffix, a `DOMAIN\` prefix) uses the pseudonym of its own domain. For example, a local account whose domain is the device name keeps that domain pseudonym when the account later appears with a UPN whose domain was mapped elsewhere. If a selected identity component such as `AccountUpn` is empty, a context-specific value is synthesized from the same account profile so the output remains complete and internally coherent; the empty string itself is never stored as a global mapping. A device FQDN uses its own device domain, independently of the accounts present in an event, retaining the pseudonymous host label. Those aliases are stored in the vault, so the identity remains stable in later records and collection runs. Existing mappings are immutable. If later username, person, email, or device evidence contradicts already assigned aliases (including inconsistent legacy mappings), collection fails with a relationship-conflict error before publishing the current result or saving incomplete mappings. Keep the prior vault and output together; use a separate new vault and recollect the complete dataset if a different alias policy is needed. No automatic migration rewrites historical identifiers. Email sender address/domain pairs and device hostname/FQDN/domain groups use the same relationship-aware behavior.
+
+## `--pseudonym-map-irreversible`
+
+Creates a mapping vault that keeps cross-run consistency without storing any original value. Default: disabled. It requires `--pseudonymize`.
+
+```bash
+./tableDumper \
+  --dump-table DeviceLogonEvents \
+  --output logons.json \
+  --pseudonymize \
+  --pseudonym-map ./collection.pseudonyms.json \
+  --pseudonym-map-irreversible
+```
+
+Each mapping records `original_hmac`, an HMAC-SHA256 of the normalized original value keyed with the vault seed, instead of `original`. Linked aliases (`alias_of`) refer to those hashed keys, and configured replacements store the hashed `find` value. Lookups use the same hash, so linked identities, device aliases, configured-replacement conflict checks, and relationship-conflict checks behave as they do in a reversible vault.
+
+Pseudonyms are generated exactly as in a reversible vault. For the same seed and input, both modes produce byte-identical output.
+
+The mode belongs to the vault file:
+
+- A new vault created with the flag is irreversible. It is written as `"version": 2` with `"mode": "irreversible"`, so older releases refuse to open it rather than rewriting it.
+- An existing irreversible vault stays irreversible when it is reopened, with or without the flag. Forgetting the flag never starts writing original values into it.
+- Passing the flag with an existing reversible vault is an error. There is no automatic migration; use a new vault path and recollect.
+
+Every vault also records a `key_id`: the first 16 hexadecimal characters of an HMAC-SHA256 of a fixed label keyed with the seed. It identifies which vault produced a collection without exposing the seed. A `key_id` that does not match the seed is rejected when the vault is loaded.
+
+This mode means "no stored plaintext", not anonymity. The vault still contains the seed, and anyone holding the vault can confirm a guessed original by recomputing its HMAC and looking it up. Short or predictable values such as usernames, hostnames, and internal domains are easy to guess. Protect an irreversible vault with the same care as a reversible one, and delete it when cross-run consistency is no longer needed.
 
 ## `--pseudonym-fields`
 
@@ -202,4 +229,4 @@ Domain-bearing URL fields replace the domain without changing unrelated path GUI
 
 ### Linked device aliases in the vault
 
-New linked mappings record an optional `alias_of` reference when a device name and a domain-typed FQDN share a pseudonym. Loading validates the reference after reading all entries, so file order does not matter. Exact matching hostname/FQDN aliases from older vaults remain readable. Unrelated cross-type collisions, dangling references, cycles, and references to a different pseudonym are rejected. The alias metadata is part of the private mapping vault and contains original identifiers, just like its mapping entries.
+New linked mappings record an optional `alias_of` reference when a device name and a domain-typed FQDN share a pseudonym. Loading validates the reference after reading all entries, so file order does not matter. Exact matching hostname/FQDN aliases from older vaults remain readable. Unrelated cross-type collisions, dangling references, cycles, and references to a different pseudonym are rejected. The alias metadata is part of the private mapping vault and contains original identifiers, just like its mapping entries. In an [irreversible vault](#--pseudonym-map-irreversible), `alias_of` references the hashed key instead, and the legacy exact-FQDN fallback does not apply.
