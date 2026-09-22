@@ -47,11 +47,11 @@ Small dumps run as one query. Large dumps resolve the result schema once with `t
 
 Scalar columns are sorted by exact column name, converted to strings, and encoded as a `pack_array` tuple. Null scalar values consistently become empty strings; equal keys share a bucket. A fixed SHA-256 prefix determines the bucket, without depending on unordered property-bag serialization or the version-dependent `hash()` algorithm. No partition field is added to exported rows.
 
-Partition counts must be unique, in range, and add up to the initial count. Every downloaded chunk must have exactly its advertised row count and retain the key columns' types. A mismatch aborts temporary outputs and keeps previously published files. These checks detect incomplete responses and many source changes; matching counts alone do not prove snapshot consistency.
+Partition counts must be unique, in range, and add up to the initial count. Every downloaded chunk must have exactly its advertised row count and retain the key columns' types. A result small enough to download as one query must likewise match the initial count, so a truncated response or rows arriving between the count and the download are never published. A mismatch aborts temporary outputs and keeps previously published files. These checks detect incomplete responses and many source changes; matching counts alone do not prove snapshot consistency.
 
 A result containing only dynamic/unknown columns fails safely when partitioning is needed. Project a stable scalar event identifier from the dynamic data in the original query. If too many rows have identical scalar keys, increasing the partition count cannot separate them; attempts are bounded and the collection returns an error. Small results can still be downloaded without a partition key.
 
-Free-form query mode reuses the supplied pipeline without rewriting its expressions. Use explicit absolute time bounds and immutable source values when completeness matters. Avoid `rand()`, unordered `take`, changing aggregations, and strings derived from unordered dynamic bags in a partitioned query. Late-arriving records or updates can change membership even within a fixed table time window; this API does not provide a cross-request snapshot.
+Free-form query mode reuses the supplied pipeline without rewriting its expressions. Use explicit absolute time bounds and immutable source values when completeness matters; a relative bound such as `ago(1h)` over recent data can change between the count and the download and then fails the row-count check. Avoid `rand()`, unordered `take`, changing aggregations, and strings derived from unordered dynamic bags in a partitioned query. Late-arriving records or updates can change membership even within a fixed table time window; this API does not provide a cross-request snapshot.
 
 The partition contract follows Microsoft's documentation for [unordered `pack_all()` objects](https://learn.microsoft.com/en-us/kusto/query/pack-all-function?view=microsoft-fabric), [ordered arrays](https://learn.microsoft.com/en-us/kusto/query/pack-array-function?view=microsoft-fabric), and [stable SHA-256 hashing](https://learn.microsoft.com/en-us/kusto/query/hash-sha256-function?view=microsoft-fabric).
 
@@ -86,7 +86,7 @@ The value must be a safe KQL identifier. Choose a column that exists in the sele
 
 ## `--dump-row-limit`
 
-Controls the maximum target size of each query or table-dump request. Default: `30000`; the value must be greater than zero.
+Controls the maximum target size of each query or table-dump request. Default: `30000`; the value must be greater than zero and at most `100000`. Advanced hunting returns at most 100,000 rows with HTTP 200 and no truncation signal, so a larger request could not be verified.
 
 - If the initial row count is below the limit, the query is requested normally.
 - If the count is equal to or above the limit, the tool counts hash partitions.
