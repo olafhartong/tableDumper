@@ -53,7 +53,7 @@ Partition counts must be unique, in range, and add up to the initial count. Ever
 
 A result containing only dynamic/unknown columns fails safely when partitioning is needed. Project a stable scalar event identifier from the dynamic data in the original query. If too many rows have identical scalar keys, increasing the partition count cannot separate them; attempts are bounded and the collection returns an error. Small results can still be downloaded without a partition key.
 
-Free-form query mode reuses the supplied pipeline without rewriting its expressions. Use explicit absolute time bounds and immutable source values when completeness matters; a relative bound such as `ago(1h)` over recent data can change between the count and the download and then fails the row-count check. Avoid `rand()`, unordered `take`, changing aggregations, and strings derived from unordered dynamic bags in a partitioned query. Late-arriving records or updates can change membership even within a fixed table time window; this API does not provide a cross-request snapshot.
+Free-form query mode reuses the supplied pipeline without rewriting its expressions. Use explicit absolute time bounds and immutable source values when completeness matters. Avoid `rand()`, unordered `take`, changing aggregations, and strings derived from unordered dynamic bags in a partitioned query. Late-arriving records or updates can change membership even within a fixed time window; this API does not provide a cross-request snapshot. Table dumps add an ingestion-time cutoff for that reason; add `| where ingestion_time() < datetime(...)` to a free-form query to get the same effect.
 
 The partition contract follows Microsoft's documentation for [unordered `pack_all()` objects](https://learn.microsoft.com/en-us/kusto/query/pack-all-function?view=microsoft-fabric), [ordered arrays](https://learn.microsoft.com/en-us/kusto/query/pack-array-function?view=microsoft-fabric), and [stable SHA-256 hashing](https://learn.microsoft.com/en-us/kusto/query/hash-sha256-function?view=microsoft-fabric).
 
@@ -69,7 +69,7 @@ Accepted values are simple KQL timespan literals such as:
 - `1.5h`
 - `30s`
 
-The collection captures one UTC cutoff before counting. Every table request uses the same half-open window: `Timestamp >= (datetime(cutoff) - lookback) and Timestamp < datetime(cutoff)` (with the configured time column). Complex KQL expressions are rejected; use `--query` or `--query-file` when the selection needs a more involved time condition.
+The collection captures one UTC cutoff before counting. Every table request uses the same half-open window: `Timestamp >= (datetime(cutoff) - lookback) and Timestamp < datetime(cutoff)` (with the configured time column). Every request also excludes rows ingested at or after the cutoff with `isnull(ingestion_time()) or ingestion_time() < datetime(cutoff)`, so events that arrive during the collection cannot change counts between requests. Events can be ingested hours after their event time, so a window that ends near the present misses events that have not arrived yet; use an older window when the most recent hours must be complete. Complex KQL expressions are rejected; use `--query` or `--query-file` when the selection needs a more involved time condition.
 
 This flag has no effect unless `--dump-table` is set.
 
