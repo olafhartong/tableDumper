@@ -58,6 +58,9 @@ func dumpTable(ctx context.Context, httpClient *http.Client, cfg config, token s
 		if err != nil {
 			return tableDumpOutput{Stats: stats}, fmt.Errorf("dump %s: %w", cfg.DumpTable, err)
 		}
+		if len(response.Results) != totalRows {
+			return tableDumpOutput{Stats: stats}, fmt.Errorf("dump %s returned %d rows, expected %d; incomplete or changed results were not published", cfg.DumpTable, len(response.Results), totalRows)
+		}
 		if pseudonyms != nil {
 			response, err = pseudonyms.PseudonymizeResponse(ctx, response)
 			if err != nil {

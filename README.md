@@ -185,7 +185,7 @@ When `--adx-export` is used with a partitioned dump, the ADX newline-delimited J
 
 `--opengraph-export` is only supported for non-partitioned queries and table dumps because building the OpenGraph payload requires all rows in memory.
 
-Table dumps reuse one fixed UTC time window and ingestion-time cutoff across all requests. Partitioned collection validates bucket totals, returned row counts, and partition-key types before publishing. See [partition safety and limitations](docs/queries-and-dumps.md#partition-safety-and-limitations) for dynamic-only results, repeated keys, and source changes.
+Table dumps reuse one fixed UTC time window across all requests. Partitioned collection validates bucket totals, returned row counts, and partition-key types before publishing; single-query results must also match the initial count. See [partition safety and limitations](docs/queries-and-dumps.md#partition-safety-and-limitations) for dynamic-only results, repeated keys, and source changes.
 
 During a table dump, progress is written to stderr. It reports the matching row count, partition sizing, and each completed partition chunk. The final summary report is still written to stdout.
 
@@ -278,6 +278,8 @@ The mapping file is a sensitive, reversible vault: it contains both original val
 ./tableDumper --dump-table DeviceLogonEvents --output logons.json \
   --pseudonymize --pseudonym-map ./collection.pseudonyms.json
 ```
+
+To keep that consistency without storing original values, add `--pseudonym-map-irreversible` when creating the vault. Mappings then record a seed-keyed HMAC of each original instead of the original itself, pseudonyms stay identical, and the vault stays irreversible whenever it is reopened. Anyone holding the vault can still confirm a guessed original by recomputing its HMAC, so it still needs protecting. See [the irreversible vault guide](docs/pseudonymization.md#--pseudonym-map-irreversible).
 
 After a successful collection, the mapping file is kept by default without prompting. To remove it automatically after a successful run, choose `delete` explicitly:
 
@@ -448,7 +450,7 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 
 `--dump-row-limit`
 - Maximum rows per query or table-dump chunk before partitioning
-- Default: `30000`
+- Default: `30000`; at most `100000`, the advanced hunting row limit
 
 `--dump-parallelism`
 - Deprecated compatibility flag; partition requests are always sequential regardless of its value
@@ -468,6 +470,10 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 `--pseudonym-map`
 - Reusable sensitive mapping-vault path
 - When omitted, a secure temporary file is created
+
+`--pseudonym-map-irreversible`
+- Create a mapping vault that stores keyed hashes instead of original values
+- Requires `--pseudonymize`; an existing irreversible vault stays irreversible without it
 
 `--pseudonym-fields`
 - Override the built-in per-table field policy with a comma-separated allowlist

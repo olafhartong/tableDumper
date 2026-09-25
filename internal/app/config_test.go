@@ -281,6 +281,17 @@ func TestParseFlagsRejectsPseudonymMapAtOutputPath(t *testing.T) {
 	}
 }
 
+func TestParseFlagsIrreversiblePseudonymMapRequiresPseudonymization(t *testing.T) {
+	cfg, err := parseFlags([]string{"--query", "DeviceInfo | limit 1", "--pseudonymize", "--pseudonym-map-irreversible"}, io.Discard)
+	if err != nil || !cfg.PseudonymMapIrreversible {
+		t.Fatalf("irreversible pseudonym map was not enabled: %v", err)
+	}
+	_, err = parseFlags([]string{"--query", "DeviceInfo | limit 1", "--pseudonym-map-irreversible"}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "-pseudonym-map-irreversible requires -pseudonymize") {
+		t.Fatalf("expected irreversible pseudonym map validation error, got %v", err)
+	}
+}
+
 func TestParseFlagsRejectsReplacementFileWithoutPseudonymization(t *testing.T) {
 	_, err := parseFlags([]string{
 		"--query", "DeviceInfo | limit 1",
@@ -339,6 +350,11 @@ func TestParseFlagsRejectsUnsafeTableDumpValues(t *testing.T) {
 			name: "unsafe time column",
 			args: []string{"--dump-table", "DeviceInfo", "--dump-time-column", "Timestamp | take 1"},
 			want: "invalid -dump-time-column",
+		},
+		{
+			name: "row limit above service limit",
+			args: []string{"--dump-table", "DeviceInfo", "--dump-row-limit", "100001"},
+			want: "must not exceed 100000",
 		},
 	}
 

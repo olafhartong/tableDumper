@@ -22,6 +22,8 @@ const (
 	defaultOutputFile   = "results.json"
 	defaultDumpLookback = "30d"
 	defaultDumpRowLimit = 30000
+	// Advanced hunting silently returns at most this many rows with HTTP 200.
+	maxDumpRowLimit = 100000
 )
 
 type config struct {
@@ -60,6 +62,7 @@ type config struct {
 	Pseudonymize              bool
 	PseudonymizeFilenames     bool
 	PseudonymMap              string
+	PseudonymMapIrreversible  bool
 	PseudonymFields           string
 	PseudonymReplacementsFile string
 	PseudonymMapRetention     string
@@ -116,6 +119,7 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	fs.BoolVar(&cfg.Pseudonymize, "pseudonymize", false, "Pseudonymize identifiers with embedded NER before writing collected data")
 	fs.BoolVar(&cfg.PseudonymizeFilenames, "pseudonymize-filenames", false, "Also pseudonymize linked filenames in file, path, and process command-line fields")
 	fs.StringVar(&cfg.PseudonymMap, "pseudonym-map", "", "Path to a reusable pseudonym mapping file (a secure temporary file is created when omitted)")
+	fs.BoolVar(&cfg.PseudonymMapIrreversible, "pseudonym-map-irreversible", false, "Create a pseudonym mapping file that stores keyed hashes instead of original values")
 	fs.StringVar(&cfg.PseudonymFields, "pseudonym-fields", envOrDotEnvAny(dotenv, "PSEUDONYM_FIELDS"), "Override the built-in table field allowlist; comma-separated with * and ? wildcards")
 	fs.StringVar(&cfg.PseudonymReplacementsFile, "pseudonym-replacements-file", envOrDotEnvAny(dotenv, "PSEUDONYM_REPLACEMENTS_FILE"), "Path to a JSON file of literal word and phrase replacements")
 	fs.StringVar(&cfg.PseudonymMapRetention, "pseudonym-map-retention", "keep", "Mapping file retention after collection: keep or delete")
@@ -203,6 +207,9 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	if cfg.DumpRowLimit <= 0 {
 		return cfg, errors.New("dump row limit must be greater than zero")
 	}
+	if cfg.DumpRowLimit > maxDumpRowLimit {
+		return cfg, fmt.Errorf("dump row limit must not exceed %d, the advanced hunting result row limit", maxDumpRowLimit)
+	}
 	if cfg.DumpParallelism <= 0 {
 		return cfg, errors.New("dump parallelism must be greater than zero")
 	}
@@ -261,6 +268,9 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	}
 	if !cfg.Pseudonymize && cfg.PseudonymMap != "" {
 		return cfg, errors.New("-pseudonym-map requires -pseudonymize")
+	}
+	if !cfg.Pseudonymize && cfg.PseudonymMapIrreversible {
+		return cfg, errors.New("-pseudonym-map-irreversible requires -pseudonymize")
 	}
 	if cfg.PseudonymizeFilenames && !cfg.Pseudonymize {
 		return cfg, errors.New("-pseudonymize-filenames requires -pseudonymize")

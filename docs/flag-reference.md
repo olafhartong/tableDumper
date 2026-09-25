@@ -13,7 +13,7 @@ This page lists every flag registered by the application. Follow the guide link 
 | `--dump-table` | identifier | empty | Collect a whole advanced hunting table over a lookback window. | [Table dumps](queries-and-dumps.md#--dump-table) |
 | `--dump-lookback` | KQL timespan | `30d` | Set the time window for a table dump. | [Table dumps](queries-and-dumps.md#--dump-lookback) |
 | `--dump-time-column` | identifier | `Timestamp` | Select the table column used for lookback filtering. | [Table dumps](queries-and-dumps.md#--dump-time-column) |
-| `--dump-row-limit` | positive integer | `30000` | Set the query and table-dump threshold that triggers hash partitioning. | [Queries and dumps](queries-and-dumps.md#--dump-row-limit) |
+| `--dump-row-limit` | integer `1`-`100000` | `30000` | Set the query and table-dump threshold that triggers hash partitioning. | [Queries and dumps](queries-and-dumps.md#--dump-row-limit) |
 | `--dump-parallelism` | positive integer | `1` | Deprecated compatibility option; requests remain sequential. | [Table dumps](queries-and-dumps.md#--dump-parallelism) |
 | `--output` | path | `results.json` | Set the main Defender query or dump output path. | [Output](queries-and-dumps.md#--output) |
 | `--adx-export` | boolean | `false` | Generate ADX NDJSON and KQL sidecars for collected results. | [ADX export](azure-data-explorer.md#--adx-export) |
@@ -39,6 +39,7 @@ This page lists every flag registered by the application. Follow the guide link 
 | `--pseudonymize` | boolean | `false` | Pseudonymize selected fields before collected data is written. | [Pseudonymization](pseudonymization.md#--pseudonymize) |
 | `--pseudonymize-filenames` | boolean | `false` | Pseudonymize filenames and keep matching path/command-line references linked. | [Filename linking](pseudonymization.md#--pseudonymize-filenames) |
 | `--pseudonym-map` | path | secure temporary file | Set a reusable, sensitive pseudonym mapping vault. | [Mapping vault](pseudonymization.md#--pseudonym-map) |
+| `--pseudonym-map-irreversible` | boolean | `false` | Create a mapping vault that stores keyed hashes instead of original values. | [Irreversible vault](pseudonymization.md#--pseudonym-map-irreversible) |
 | `--pseudonym-fields` | comma-separated patterns | `PSEUDONYM_FIELDS`, then built-in table policy | Override the selected-column allowlist. | [Field policy](pseudonymization.md#--pseudonym-fields) |
 | `--pseudonym-replacements-file` | path | `PSEUDONYM_REPLACEMENTS_FILE` | Load configured literal replacements from JSON. | [Replacements](pseudonymization.md#--pseudonym-replacements-file) |
 | `--pseudonym-map-retention` | `keep`, `delete` | `keep` | Choose what happens to the mapping vault after collection. This is non-interactive. | [Retention](pseudonymization.md#--pseudonym-map-retention) |

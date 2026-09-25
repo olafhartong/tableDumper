@@ -34,6 +34,9 @@ func dumpQuery(ctx context.Context, httpClient *http.Client, cfg config, token, 
 			progressf(progress, "[i] unpartitioned query exceeded the service result-size limit; retrying with hash partitions...")
 			return dumpPartitionedQuery(ctx, httpClient, cfg, token, baseQuery, totalRows, 2, stats, pseudonyms, progress)
 		}
+		if len(response.Results) != totalRows {
+			return tableDumpOutput{Stats: stats}, fmt.Errorf("query returned %d rows, expected %d; incomplete or changed results were not published", len(response.Results), totalRows)
+		}
 		if pseudonyms != nil {
 			response, err = pseudonyms.PseudonymizeResponse(ctx, response)
 			if err != nil {

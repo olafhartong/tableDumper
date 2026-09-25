@@ -17,6 +17,8 @@ Runs the supplied string as a Defender XDR advanced hunting KQL query. The tool 
 
 The result is written as the Graph hunting response envelope, containing `Schema` and `Results`. `--adx-export` and `--pseudonymize` work with both normal and partitioned results. `--opengraph-export` requires a non-partitioned result because graph construction loads all rows in memory.
 
+Values keep the Graph encoding: booleans arrive as `1`/`0` with an `@odata.type` annotation, null scalars as `{}`, and timespans as ISO 8601 durations. Graph fails with HTTP 500 when a result contains a dynamic array that mixes value types, such as `dynamic([1, "x"])`; convert such values with `tostring()` in the query.
+
 ## `--query-file`
 
 Reads KQL from a file and trims surrounding whitespace. It uses the same count and automatic partitioning pipeline as `--query`.
@@ -47,7 +49,7 @@ Small dumps run as one query. Large dumps resolve the result schema once with `t
 
 Scalar columns are sorted by exact column name, converted to strings, and encoded as a `pack_array` tuple. Null scalar values consistently become empty strings; equal keys share a bucket. A fixed SHA-256 prefix determines the bucket, without depending on unordered property-bag serialization or the version-dependent `hash()` algorithm. No partition field is added to exported rows.
 
-Partition counts must be unique, in range, and add up to the initial count. Every downloaded chunk must have exactly its advertised row count and retain the key columns' types. A mismatch aborts temporary outputs and keeps previously published files. These checks detect incomplete responses and many source changes; matching counts alone do not prove snapshot consistency.
+Partition counts must be unique, in range, and add up to the initial count. Every downloaded chunk must have exactly its advertised row count and retain the key columns' types. A result small enough to download as one query must likewise match the initial count, so a truncated response or rows arriving between the count and the download are never published. A mismatch aborts temporary outputs and keeps previously published files. These checks detect incomplete responses and many source changes; matching counts alone do not prove snapshot consistency.
 
 A result containing only dynamic/unknown columns fails safely when partitioning is needed. Project a stable scalar event identifier from the dynamic data in the original query. If too many rows have identical scalar keys, increasing the partition count cannot separate them; attempts are bounded and the collection returns an error. Small results can still be downloaded without a partition key.
 
@@ -86,7 +88,7 @@ The value must be a safe KQL identifier. Choose a column that exists in the sele
 
 ## `--dump-row-limit`
 
-Controls the maximum target size of each query or table-dump request. Default: `30000`; the value must be greater than zero.
+Controls the maximum target size of each query or table-dump request. Default: `30000`; the value must be greater than zero and at most `100000`. Advanced hunting returns at most 100,000 rows with HTTP 200 and no truncation signal, so a larger request could not be verified.
 
 - If the initial row count is below the limit, the query is requested normally.
 - If the count is equal to or above the limit, the tool counts hash partitions.
