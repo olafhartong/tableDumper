@@ -293,9 +293,8 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 	}
 }
 
-func TestDumpTableFallsBackWhenSingleQueryExceedsByteLimit(t *testing.T) {
+func TestDumpTableRejectsSingleQueryRowCountMismatch(t *testing.T) {
 	var baseQuery string
-	attemptedSingleQuery := false
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := readAdvancedQueryRequest(t, r)
 		if baseQuery == "" {
@@ -304,50 +303,45 @@ func TestDumpTableFallsBackWhenSingleQueryExceedsByteLimit(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch query {
 		case baseQuery + "\n| count":
-			io.WriteString(w, `{"Results":[{"Count":2}]}`)
+			io.WriteString(w, `{"Results":[{"Count":3}]}`)
 		case baseQuery:
-			attemptedSingleQuery = true
-			w.WriteHeader(http.StatusBadRequest)
-			io.WriteString(w, `{"error":{"code":"BadRequest","message":"Query execution has exceeded the allowed result size. Optimize your query by limiting the amount of results and try again."}}`)
-		case baseQuery + "\n| take 0":
-			io.WriteString(w, `{"Schema":[{"Name":"ReportId","Type":"Int64"}],"Results":[]}`)
-		case baseQuery + "\n| summarize Count=count() by DumpPartition=(tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"ReportId\"])))), 0, 15))) % 2)":
-			io.WriteString(w, `{"Results":[{"DumpPartition":0,"Count":1},{"DumpPartition":1,"Count":1}]}`)
-		case baseQuery + "\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"ReportId\"])))), 0, 15))) % 2) == 0":
-			io.WriteString(w, `{"Schema":[{"Name":"ReportId","Type":"Int64"}],"Results":[{"ReportId":1}]}`)
-		case baseQuery + "\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"ReportId\"])))), 0, 15))) % 2) == 1":
-			io.WriteString(w, `{"Schema":[{"Name":"ReportId","Type":"Int64"}],"Results":[{"ReportId":2}]}`)
+			// The service returns HTTP 200 without a truncation signal.
+			io.WriteString(w, `{"Schema":[{"Name":"DeviceName","Type":"String"}],"Results":[{"DeviceName":"host1"},{"DeviceName":"host2"}]}`)
 		default:
 			t.Fatalf("unexpected query %q", query)
 		}
 	}))
 	defer server.Close()
 
+	directory := t.TempDir()
+	pseudonyms, err := newPseudonymizer(filepath.Join(directory, "mappings.json"))
+	if err != nil {
+		t.Fatalf("newPseudonymizer returned error: %v", err)
+	}
 	cfg := config{
-		DumpTable:      "DeviceProcessEvents",
-		DumpLookback:   "12h",
+		Endpoint:       server.URL,
+		DumpTable:      "DeviceInfo",
+		DumpLookback:   "30d",
 		DumpTimeColumn: "Timestamp",
 		DumpRowLimit:   defaultDumpRowLimit,
-		Output:         filepath.Join(t.TempDir(), "processes.json"),
+		ADXExport:      true,
+		Output:         filepath.Join(directory, "deviceinfo.json"),
 	}
-	var progress bytes.Buffer
-	output, err := dumpTable(context.Background(), newDefenderQuerySource(server.Client(), server.URL, "token-value"), cfg, nil, &progress)
+
+	_, err = dumpTable(context.Background(), server.Client(), cfg, "token-value", pseudonyms, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "dump DeviceInfo returned 2 rows, expected 3") {
+		t.Fatalf("expected row count mismatch error, got %v", err)
+	}
+	entries, err := os.ReadDir(directory)
 	if err != nil {
-		t.Fatalf("dumpTable returned error: %v", err)
+		t.Fatalf("read output directory: %v", err)
 	}
-	if !attemptedSingleQuery {
-		t.Fatal("single-query dump was not attempted")
-	}
-	if output.Rows != 2 || output.Stats.TotalRows != 2 || output.Stats.Chunks != 2 || output.Stats.Partitions != 2 {
-		t.Fatalf("unexpected output %#v", output)
-	}
-	for _, want := range []string{
-		"single-query dump exceeded the service result-size limit",
-		"counting rows across 2 hash partition(s)",
-		"completed partitioned dump with 2 row(s)",
-	} {
-		if !strings.Contains(progress.String(), want) {
-			t.Fatalf("expected progress to contain %q, got:\n%s", want, progress.String())
+	for _, entry := range entries {
+		if entry.Name() != "mappings.json" {
+			t.Fatalf("incomplete result published %s", entry.Name())
 		}
+	}
+	if pseudonyms.NewMappingCount() != 0 {
+		t.Fatalf("rows from an incomplete result were pseudonymized")
 	}
 }

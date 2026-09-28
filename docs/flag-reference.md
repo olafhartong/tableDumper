@@ -16,8 +16,8 @@ This page lists every flag registered by the application. Follow the guide link 
 | `--query-file` | path | empty | Read the KQL query from a UTF-8 text file. | [Queries](queries-and-dumps.md#--query-file) |
 | `--dump-table` | identifier | empty | Collect a whole advanced hunting or Log Analytics table over a lookback window. | [Table dumps](queries-and-dumps.md#--dump-table) |
 | `--dump-lookback` | KQL timespan | `30d` | Set the time window for a table dump. | [Table dumps](queries-and-dumps.md#--dump-lookback) |
-| `--dump-time-column` | identifier | `Timestamp`; `TimeGenerated` for `loganalytics` | Select the table column used for lookback filtering. | [Table dumps](queries-and-dumps.md#--dump-time-column) |
-| `--dump-row-limit` | positive integer | `30000` | Set the query and table-dump threshold that triggers hash partitioning. | [Queries and dumps](queries-and-dumps.md#--dump-row-limit) |
+| `--dump-time-column` | identifier | `Timestamp` | Select the table column used for lookback filtering. | [Table dumps](queries-and-dumps.md#--dump-time-column) |
+| `--dump-row-limit` | integer `1`-`100000` | `30000` | Set the query and table-dump threshold that triggers hash partitioning. | [Queries and dumps](queries-and-dumps.md#--dump-row-limit) |
 | `--dump-parallelism` | positive integer | `1` | Deprecated compatibility option; requests remain sequential. | [Table dumps](queries-and-dumps.md#--dump-parallelism) |
 | `--output` | path | `results.json` | Set the main Defender query or dump output path. | [Output](queries-and-dumps.md#--output) |
 | `--manifest` | path | empty | Create or update a collection manifest recording what each query or table dump captured. | [Manifest](queries-and-dumps.md#--manifest) |

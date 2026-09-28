@@ -114,7 +114,15 @@ func getAzureCLIToken(ctx context.Context, cfg authConfig) (string, error) {
 		return "", fmt.Errorf("run Azure CLI token command: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 
-	var tokenResp tokenResponse
+	return parseAzureCLITokenResponse(output)
+}
+
+// parseAzureCLITokenResponse reads the output of az account get-access-token,
+// which uses accessToken rather than the OAuth access_token field.
+func parseAzureCLITokenResponse(output []byte) (string, error) {
+	var tokenResp struct {
+		AccessToken string `json:"accessToken"`
+	}
 	if err := json.Unmarshal(output, &tokenResp); err != nil {
 		return "", fmt.Errorf("decode Azure CLI token response: %w", err)
 	}

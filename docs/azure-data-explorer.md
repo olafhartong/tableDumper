@@ -23,6 +23,8 @@ Generates two sidecars next to `--output`:
   --adx-table DefenderEvents
 ```
 
+Advanced hunting reports .NET type names. `SByte` (bool) becomes an ADX `bool` column and `SqlDecimal` becomes `decimal`. `TimeSpan` becomes `dynamic` because Graph returns ISO 8601 durations such as `P1DT2H3M4.5S`, which Kusto does not parse as `timespan`; convert them in a query if needed.
+
 Export requires query or table-dump results with a usable schema. When the Graph response has no schema, the tool attempts to infer it from returned rows. `--adx-cluster` and `--adx-database` are not needed because no upload occurs.
 
 For partitioned queries and table dumps, the NDJSON sidecar is streamed with the main output. If pseudonymization is enabled, both the main output and ADX data sidecar contain pseudonymized values.

@@ -223,3 +223,14 @@ func TestIndivisibleScalarKeysFailWithinBoundedRequests(t *testing.T) {
 		t.Fatal("indivisible query published a file")
 	}
 }
+
+func TestPartitionKeyIncludesGraphBoolAndDecimalColumns(t *testing.T) {
+	key, err := newQueryPartitionKey([]queryColumn{{"IsAzureADJoined", "SByte"}, {"Amount", "SqlDecimal"}, {"Duration", "TimeSpan"}, {"AdditionalFields", "Object"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []queryColumn{{"Amount", "decimal"}, {"Duration", "timespan"}, {"IsAzureADJoined", "bool"}}
+	if fmt.Sprint(key.columns) != fmt.Sprint(want) {
+		t.Fatalf("partition key columns = %v, want %v", key.columns, want)
+	}
+}

@@ -145,3 +145,34 @@ func TestDumpQueryFallsBackWhenSmallResultExceedsByteLimit(t *testing.T) {
 		t.Fatalf("fallback was not reported in progress:\n%s", progress.String())
 	}
 }
+
+func TestDumpQueryRejectsSingleQueryRowCountMismatch(t *testing.T) {
+	baseQuery := "DeviceInfo\n| where Timestamp > ago(1h)"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := readAdvancedQueryRequest(t, r)
+		w.Header().Set("Content-Type", "application/json")
+		switch query {
+		case baseQuery + "\n| count":
+			io.WriteString(w, `{"Results":[{"Count":1}]}`)
+		case baseQuery:
+			// A row arrived between the count and the download.
+			io.WriteString(w, `{"Schema":[{"Name":"DeviceName","Type":"String"}],"Results":[{"DeviceName":"host1"},{"DeviceName":"host2"}]}`)
+		default:
+			t.Fatalf("unexpected query %q", query)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config{
+		Endpoint:     server.URL,
+		DumpRowLimit: defaultDumpRowLimit,
+		Output:       filepath.Join(t.TempDir(), "query-results.json"),
+	}
+	_, err := dumpQuery(context.Background(), server.Client(), cfg, "token-value", baseQuery, nil, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "query returned 2 rows, expected 1") {
+		t.Fatalf("expected row count mismatch error, got %v", err)
+	}
+	if _, err := os.Stat(cfg.Output); !os.IsNotExist(err) {
+		t.Fatalf("incomplete result was published: %v", err)
+	}
+}

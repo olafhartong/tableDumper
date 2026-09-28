@@ -37,6 +37,9 @@ func dumpQuery(ctx context.Context, source querySource, cfg config, query string
 		if response, err = withEmptyResultSchema(ctx, source, baseQuery, response, progress); err != nil {
 			return tableDumpOutput{Stats: stats}, err
 		}
+		if len(response.Results) != totalRows {
+			return tableDumpOutput{Stats: stats}, fmt.Errorf("query returned %d rows, expected %d; incomplete or changed results were not published", len(response.Results), totalRows)
+		}
 		if pseudonyms != nil {
 			response, err = pseudonyms.PseudonymizeResponse(ctx, response)
 			if err != nil {
