@@ -51,54 +51,67 @@ func runAdvancedQueryWithProgress(ctx context.Context, httpClient *http.Client, 
 		return nil, queryResponse{}, fmt.Errorf("encode query request: %w", err)
 	}
 
-	url := endpoint + "/security/runHuntingQuery"
+	resp, body, err := postQueryWithThrottleRetry(ctx, httpClient, endpoint+"/security/runHuntingQuery", token, requestBody, nil, "advanced query", progress)
+	if err != nil {
+		return nil, queryResponse{}, err
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, queryResponse{}, &advancedQueryError{
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Body:       strings.TrimSpace(string(body)),
+		}
+	}
+
+	parsed, err := parseQueryResponse(body)
+	if err != nil {
+		return nil, queryResponse{}, fmt.Errorf("decode query response: %w", err)
+	}
+
+	return body, parsed, nil
+}
+
+// postQueryWithThrottleRetry sends a JSON query request and waits out HTTP 429
+// responses. Every other response is returned with its fully read body.
+func postQueryWithThrottleRetry(ctx context.Context, httpClient *http.Client, url, token string, requestBody []byte, headers map[string]string, description string, progress io.Writer) (*http.Response, []byte, error) {
 	throttleCount := 0
 	for {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(requestBody))
 		if err != nil {
-			return nil, queryResponse{}, fmt.Errorf("build query request: %w", err)
+			return nil, nil, fmt.Errorf("build query request: %w", err)
 		}
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json")
+		for name, value := range headers {
+			req.Header.Set(name, value)
+		}
 
 		resp, err := httpClient.Do(req)
 		if err != nil {
-			return nil, queryResponse{}, fmt.Errorf("run advanced query: %w", err)
+			return nil, nil, fmt.Errorf("run %s: %w", description, err)
 		}
 
 		body, readErr := io.ReadAll(resp.Body)
 		resp.Body.Close()
 		if readErr != nil {
-			return nil, queryResponse{}, fmt.Errorf("read query response: %w", readErr)
+			return nil, nil, fmt.Errorf("read query response: %w", readErr)
 		}
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			throttleCount++
 			delay := advancedQueryRetryDelay(resp.Header, body, throttleCount, time.Now())
-			progressf(progress, "[!] advanced query throttled (429); waiting %s before retrying", delay)
+			progressf(progress, "[!] %s throttled (429); waiting %s before retrying", description, delay)
 			if err := waitForAdvancedQueryRetry(ctx, delay); err != nil {
-				return nil, queryResponse{}, fmt.Errorf("wait to retry advanced query: %w", err)
+				return nil, nil, fmt.Errorf("wait to retry %s: %w", description, err)
 			}
 			continue
 		}
 
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return nil, queryResponse{}, &advancedQueryError{
-				StatusCode: resp.StatusCode,
-				Status:     resp.Status,
-				Body:       strings.TrimSpace(string(body)),
-			}
-		}
-
-		parsed, err := parseQueryResponse(body)
-		if err != nil {
-			return nil, queryResponse{}, fmt.Errorf("decode query response: %w", err)
-		}
-
-		return body, parsed, nil
+		return resp, body, nil
 	}
 }
 

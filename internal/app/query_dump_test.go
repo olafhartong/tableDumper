@@ -54,7 +54,7 @@ func TestDumpQueryWithHashPartitioning(t *testing.T) {
 		DumpParallelism: 1,
 	}
 	var progress bytes.Buffer
-	output, err := dumpQuery(context.Background(), server.Client(), cfg, "token-value", baseQuery+";", nil, &progress)
+	output, err := dumpQuery(context.Background(), newDefenderQuerySource(server.Client(), server.URL, "token-value"), cfg, baseQuery+";", nil, &progress)
 	if err != nil {
 		t.Fatalf("dumpQuery returned error: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestDumpQueryFallsBackWhenSmallResultExceedsByteLimit(t *testing.T) {
 		Output:       filepath.Join(t.TempDir(), "wide-query-results.json"),
 	}
 	var progress bytes.Buffer
-	output, err := dumpQuery(context.Background(), server.Client(), cfg, "token-value", baseQuery, nil, &progress)
+	output, err := dumpQuery(context.Background(), newDefenderQuerySource(server.Client(), server.URL, "token-value"), cfg, baseQuery, nil, &progress)
 	if err != nil {
 		t.Fatalf("dumpQuery returned error: %v", err)
 	}

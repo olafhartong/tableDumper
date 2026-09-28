@@ -1,10 +1,10 @@
 # Authentication and networking
 
-Defender XDR queries use Microsoft Graph credentials. Direct Azure Data Explorer uploads use a separate set of ADX credentials described in [Azure Data Explorer](azure-data-explorer.md#adx-authentication-flags). BloodHound has its own authentication flags.
+Defender XDR queries use Microsoft Graph credentials. Log Analytics queries use the same credentials with a Log Analytics token audience. Direct Azure Data Explorer uploads use a separate set of ADX credentials described in [Azure Data Explorer](azure-data-explorer.md#adx-authentication-flags). BloodHound has its own authentication flags.
 
 ## `--auth`
 
-Selects token acquisition for Microsoft Graph and ADX actions. Default: `auto`.
+Selects token acquisition for Microsoft Graph, Log Analytics, and ADX actions. Default: `auto`.
 
 | Value | Behavior |
 |---|---|
@@ -13,7 +13,7 @@ Selects token acquisition for Microsoft Graph and ADX actions. Default: `auto`.
 | `azcli` | Calls `az account get-access-token` and requires a prior `az login`. |
 | `none` | Skips token acquisition and omits the `Authorization` header. Use only with an endpoint intentionally configured for anonymous access. |
 
-The "current target" distinction matters: Defender/Graph uses `--tenant-id`, `--client-id`, and `--client-secret`; ADX uses their `--adx-*` equivalents. Graph credentials are not silently reused for ADX.
+The "current target" distinction matters: Defender/Graph and Log Analytics use `--tenant-id`, `--client-id`, and `--client-secret`; ADX uses their `--adx-*` equivalents. Graph credentials are not silently reused for ADX.
 
 With `auto`, partially configured service-principal credentials do not produce a hybrid mode; the tool falls back to Azure CLI. Use `--auth sp` when incomplete credentials should fail immediately.
 
@@ -47,6 +47,41 @@ Sets the OAuth resource/audience requested for Defender/Graph tokens. Default: `
 
 This value is sent in the service-principal token request and passed to `az account get-access-token --resource`. Keep it aligned with `--endpoint`, especially in sovereign clouds. A trailing slash is removed automatically.
 
+## `--workspace-id`
+
+Sets the Log Analytics workspace queried by `--source loganalytics`. Environment variable: `LOG_ANALYTICS_WORKSPACE_ID`. It is required for a query or table dump with that source and is ignored by the Defender source.
+
+Use the workspace ID GUID shown on the workspace's overview page, not its Azure resource ID or name. Any other value is rejected.
+
+The identity used for the token needs read access to the workspace's data: the **Log Analytics Reader** role (or **Reader**, or **Microsoft Sentinel Reader** for a Sentinel workspace) on the workspace or a parent scope. The underlying permission is `Microsoft.OperationalInsights/workspaces/query/read`. Tables protected with table-level access can return no rows instead of an error when that access is missing. For a service principal, assign the role to the application's enterprise application; no Microsoft Graph permission is needed for this source.
+
+```bash
+./tableDumper \
+  --auth sp \
+  --source loganalytics \
+  --workspace-id "$LOG_ANALYTICS_WORKSPACE_ID" \
+  --query-file queries/signins.kql \
+  --output signins.json
+```
+
+## `--la-endpoint`
+
+Sets the Log Analytics query API base URL. Default: `https://api.loganalytics.azure.com/v1`. The tool appends `/workspaces/<workspace-id>/query`. A trailing slash is removed automatically.
+
+## `--la-resource`
+
+Sets the OAuth resource/audience requested for Log Analytics tokens. Default: `https://api.loganalytics.io`. It is used for the service-principal token request and passed to `az account get-access-token --resource`.
+
+Keep `--la-endpoint` and `--la-resource` aligned. For sovereign clouds:
+
+| Cloud | `--la-endpoint` | `--la-resource` |
+|---|---|---|
+| Azure public | `https://api.loganalytics.azure.com/v1` | `https://api.loganalytics.io` |
+| Azure US Government | `https://api.loganalytics.us/v1` | `https://api.loganalytics.us` |
+| Azure China (21Vianet) | `https://api.loganalytics.azure.cn/v1` | `https://api.loganalytics.azure.cn` |
+
+Set `--login-base-url` to the matching Microsoft Entra authority, for example `https://login.microsoftonline.us` or `https://login.chinacloudapi.cn`.
+
 ## `--login-base-url`
 
 Sets the Microsoft Entra login base used for service-principal token requests. Default: `https://login.microsoftonline.com`.
@@ -57,7 +92,7 @@ The token URL is formed as:
 <login-base-url>/<tenant-id>/oauth2/token
 ```
 
-This setting affects both Graph and ADX service-principal token requests. Azure CLI authentication manages its own login endpoints. A trailing slash is removed automatically.
+This setting affects Graph, Log Analytics, and ADX service-principal token requests. Azure CLI authentication manages its own login endpoints. A trailing slash is removed automatically.
 
 ## `--env-file`
 
@@ -79,6 +114,7 @@ The loader supports `KEY=VALUE`, optional `export `, and matching single or doub
 Only flags explicitly wired to environment variables read values from this file:
 
 - `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`
+- `LOG_ANALYTICS_WORKSPACE_ID`
 - `ADX_CLUSTER`, `ADX_DATABASE`, `ADX_AUTH`, `ADX_TENANT_ID`, `ADX_CLIENT_ID`, `ADX_CLIENT_SECRET`, `ADX_RESOURCE`
 - `BLOODHOUND_URL`, `BLOODHOUND_TOKEN`, `BLOODHOUND_TOKEN_ID`, `BLOODHOUND_TOKEN_KEY`
 - `PSEUDONYM_FIELDS`, `PSEUDONYM_REPLACEMENTS_FILE`
@@ -89,7 +125,7 @@ Explicit flags override the process environment; the process environment overrid
 
 Sets the timeout on the shared in-process HTTP client. Default: `60s`.
 
-The value uses Go duration syntax, for example `500ms`, `30s`, `2m`, or `1m30s`. It applies independently to Microsoft Entra service-principal token requests, Graph calls, ADX calls, and BloodHound calls. It does not configure the Azure CLI's own network timeout.
+The value uses Go duration syntax, for example `500ms`, `30s`, `2m`, or `1m30s`. It applies independently to Microsoft Entra service-principal token requests, Graph calls, Log Analytics calls, ADX calls, and BloodHound calls. It does not configure the Azure CLI's own network timeout.
 
 Choose a value large enough for ADX ingestion and large Graph hunting responses. A timeout aborts the current HTTP request; it does not resume or retry that request automatically.
 

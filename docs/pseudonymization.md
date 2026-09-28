@@ -121,7 +121,7 @@ The mode belongs to the vault file:
 - An existing irreversible vault stays irreversible when it is reopened, with or without the flag. Forgetting the flag never starts writing original values into it.
 - Passing the flag with an existing reversible vault is an error. There is no automatic migration; use a new vault path and recollect.
 
-Every vault also records a `key_id`: the first 16 hexadecimal characters of an HMAC-SHA256 of a fixed label keyed with the seed. It identifies which vault produced a collection without exposing the seed. A `key_id` that does not match the seed is rejected when the vault is loaded.
+Every vault also records a `key_id`: the first 16 hexadecimal characters of an HMAC-SHA256 of a fixed label keyed with the seed. It identifies which vault produced a collection without exposing the seed. A `key_id` that does not match the seed is rejected when the vault is loaded. [`--manifest`](queries-and-dumps.md#--manifest) records it to identify the vault used for a collection.
 
 This mode means "no stored plaintext", not anonymity. The vault still contains the seed, and anyone holding the vault can confirm a guessed original by recomputing its HMAC and looking it up. Short or predictable values such as usernames, hostnames, and internal domains are easy to guess. Protect an irreversible vault with the same care as a reversible one, and delete it when cross-run consistency is no longer needed.
 
