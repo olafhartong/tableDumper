@@ -89,11 +89,15 @@ func linkedFilenameField(field string) (string, string, bool) {
 		{"filepath", "path"},
 		{"fullpath", "path"},
 		{"filename", "filename"},
+		{"processname", "filename"},
 	} {
 		if !strings.HasSuffix(name, suffix.value) {
 			continue
 		}
 		family := strings.TrimSuffix(name, suffix.value)
+		if suffix.value == "processname" {
+			family += "process"
+		}
 		if family == "" || family == "process" {
 			family = "process"
 		}

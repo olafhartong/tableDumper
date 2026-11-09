@@ -9,13 +9,14 @@ import (
 )
 
 const (
-	identityPseudonymFields = "*accountname,*username,*userprincipalname,*userprincipal,*upn,*email,*emailaddress,*mailaddress,*mailaddresses"
-	emailPseudonymFields    = "*userprincipalname,*userprincipal,*upn,*email,*emailaddress,*mailaddress,*mailaddresses,senderfromaddress,sendermailfromaddress"
-	filePseudonymFields     = "*filename,*fileinternalname,*fileoriginalname,*folderpath,*filepath,*fullpath,*filedirectory,*workingdirectory,*currentdirectory,*homedirectory,*profilepath,*sharename"
-	domainPseudonymFields   = "*domain,*domainname,*accountdomain,*dnsname,*dnsdomain,*urldomain,*fqdn"
-	computerPseudonymFields = "computer,*devicename,*computername,*machinename,*hostname,*workstationname,*instancevmname"
-	azurePseudonymFields    = "*subscriptionid,*resourcegroupname,*resourcegroup,*resourceid"
-	defaultPseudonymFields  = identityPseudonymFields + "," + filePseudonymFields + "," + domainPseudonymFields + "," + computerPseudonymFields + "," + azurePseudonymFields
+	identityPseudonymFields   = "*accountname,*username,*useraccount,*loginname,*userprincipalname,*userprincipal,*upn,*accountupns,*email,*emailaddress,*mailaddress,*mailaddresses," + identityDisplayNameFields
+	identityDisplayNameFields = "*accountdisplayname,*userdisplayname,*ownerdisplayname,*recipientdisplayname,*senderdisplayname,*actordisplayname"
+	emailPseudonymFields      = "*userprincipalname,*userprincipal,*upn,*email,*emailaddress,*mailaddress,*mailaddresses,senderfromaddress,sendermailfromaddress,emailfromaddress,emailmailfromaddress,emailreplytoaddress," + identityDisplayNameFields
+	filePseudonymFields       = "*filename,*fileinternalname,*fileoriginalname,*folderpath,*filepath,*fullpath,*filedirectory,*workingdirectory,*currentdirectory,*homedirectory,*profilepath,*sharename"
+	domainPseudonymFields     = "*domain,*domainname,*accountdomain,*dnsname,*dnsdomain,*urldomain,*fqdn"
+	computerPseudonymFields   = "computer,*devicename,*computername,*machinename,*hostname,*workstationname,*instancevmname"
+	azurePseudonymFields      = "*subscriptionid,*resourcegroupname,*resourcegroup,*resourceid"
+	defaultPseudonymFields    = identityPseudonymFields + "," + filePseudonymFields + "," + domainPseudonymFields + "," + computerPseudonymFields + "," + azurePseudonymFields
 )
 
 var defaultPseudonymFieldsByTable = map[string]string{
@@ -49,6 +50,7 @@ var defaultPseudonymFieldsByTable = map[string]string{
 // Host, or Resource is not pseudonymized everywhere.
 var additionalPseudonymFieldsByTable = map[string]string{
 	"aadnoninteractiveusersigninlogs":       "alternatesigninname",
+	"aadsignineventsbeta":                   "alternatesigninname",
 	"abapauditlog":                          "user,host",
 	"abapchangedocslog":                     "user",
 	"abaptabledatalog":                      "user,host",
@@ -57,6 +59,7 @@ var additionalPseudonymFieldsByTable = map[string]string{
 	"alertevidence":                         "remoteurl",
 	"asimalerteventlogs":                    "user,processname",
 	"asimassetentitylogs":                   "user",
+	"asimemaileventlogs":                    "emailfromaddress,emailmailfromaddress,emailreplytoaddress,emailtorecipients,emailccrecipients,emailbccrecipients",
 	"asimfileeventlogs":                     "actingprocessname",
 	"asimprocesseventlogs":                  "actingprocessname,parentprocessname,targetprocessname",
 	"asimregistryeventlogs":                 "actingprocessname,parentprocessname",
@@ -66,9 +69,14 @@ var additionalPseudonymFieldsByTable = map[string]string{
 	"azureactivity":                         "resource",
 	"azurediagnostics":                      "resource",
 	"azuremetrics":                          "resource",
-	"behavioranalytics":                     "actorname,actorprincipalname,device",
+	"behavioranalytics":                     "actorname,actorprincipalname,targetname,targetprincipalname,device",
 	"behaviorentities":                      "remoteurl",
 	"cloudprocessevents":                    "parentprocessname,processname",
+	"clouddnsevents":                        "dnsquery,processname",
+	"cloudauditevents":                      "account",
+	"cloudappevents":                        "accountid",
+	"callactivityevents":                    "activityinitiatordisplayname",
+	"commonsecuritylog":                     "processname,sourceprocessname,destinationprocessname",
 	"communicationcomplianceactivity":       "actorname",
 	"copilotactivity":                       "actorname",
 	"crowdstrikealerts":                     "assignedtoname",
@@ -77,15 +85,22 @@ var additionalPseudonymFieldsByTable = map[string]string{
 	"crowdstrikeincidents":                  "assignedtoname",
 	"deviceevents":                          "remoteurl",
 	"devicenetworkevents":                   "remoteurl",
-	"dnsauditevents":                        "name,zonefile",
+	"dnsauditevents":                        "name,zonefile,dnsquery",
+	"asimdnsactivitylogs":                   "dnsquery",
 	"dynamics365activity":                   "userid",
 	"entraidsigninevents":                   "alternatesigninname",
+	"exposuregraphnodes":                    "nodename",
+	"exposuregraphedges":                    "sourcenodename,targetnodename",
 	"gcpdns":                                "queryname",
 	"graphnotificationsactivitylogs":        "subscriptionidentity",
+	"identityinfo":                          "givenname,surname,address,phone,manager,companyname,employeeid,distinguishedname,sipproxyaddress",
+	"identityaccountinfo":                   "displayname,givenname,surname,address,phone,manager,employeeid,accountid",
+	"identityevents":                        "accountid",
+	"emailevents":                           "to,cc,distributionlist",
 	"heartbeat":                             "resource",
 	"ilumioinsights":                        "resourcesubid",
 	"linuxauditlog":                         "user",
-	"microsoftpurviewinformationprotection": "userid",
+	"microsoftpurviewinformationprotection": "userid,sender",
 	"officeactivity":                        "userid",
 	"powerappsactivity":                     "actorname",
 	"powerautomateactivity":                 "actorname",
@@ -101,6 +116,11 @@ var additionalPseudonymFieldsByTable = map[string]string{
 	"signinlogs":                            "alternatesigninname",
 }
 
+// URL columns were reviewed against https://xdrinternals.com/FullSchema-latest.json.
+// Select concrete names rather than *url* (which also matches category, length,
+// location and other metadata). Only domains within these values are replaced.
+const urlPseudonymFields = "url,remoteurl,fileoriginurl,fileoriginreferrerurl,urlchain,urloriginal,requesturl,requesturi,siteurl,instanceurl,itemurl,targeturl,calljoinurl,resourceurl,reporturl,eventreporturl,redirecturl,httprequestrequesturl,payloadrequestserviceserviceurl,siteprimaryuri,crldistributionpointurls"
+
 func defaultPseudonymFieldsForTable(table string) string {
 	name := strings.ToLower(strings.TrimSpace(table))
 	fields, ok := defaultPseudonymFieldsByTable[name]
@@ -108,9 +128,32 @@ func defaultPseudonymFieldsForTable(table string) string {
 		fields = defaultPseudonymFields
 	}
 	if additional := additionalPseudonymFieldsByTable[name]; additional != "" {
-		return fields + "," + additional
+		fields += "," + additional
+	}
+	// Arbitrary queries keep their conservative fallback; known tables opt into
+	// URL columns whose schema identifies them as network locations.
+	if schemaURLTables[name] {
+		fields += "," + urlPseudonymFields
 	}
 	return fields
+}
+
+var schemaURLTables = map[string]bool{
+	"alertevidence": true, "behaviorentities": true, "sentinelbehaviorentities": true,
+	"deviceevents": true, "devicenetworkevents": true, "devicefileevents": true,
+	"devicealertevents": true, "devicefilecertificateinfo": true,
+	"emailurlinfo": true, "messageurlinfo": true, "urlclickevents": true,
+	"cloudkeyvaultevents": true, "graphapiauditevents": true, "callactivityevents": true,
+	"asimalerteventlogs": true, "asimassetentitylogs": true, "asimauditeventlogs": true,
+	"asimauthenticationeventlogs": true, "asimdhcpeventlogs": true, "asimdnsactivitylogs": true,
+	"asimemaileventlogs": true, "asimfileeventlogs": true, "asimnetworksessionlogs": true,
+	"asimprocesseventlogs": true, "asimregistryeventlogs": true,
+	"asimusermanagementactivitylogs": true, "asimwebsessionlogs": true,
+	"awsalbaccesslogs": true, "alert": true, "commonsecuritylog": true,
+	"crowdstrikeauditevents": true, "dataverseactivity": true, "dynamics365activity": true,
+	"gcpcdn": true, "gcpcloudrun": true, "gcploadbalancer": true, "googleworkspacereports": true,
+	"microsoftgraphactivitylogs": true, "aadgraphactivitylogs": true,
+	"networksessions": true, "officeactivity": true, "threatintelligenceindicator": true,
 }
 
 type pseudonymFieldPolicy struct {

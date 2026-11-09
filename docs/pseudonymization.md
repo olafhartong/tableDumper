@@ -30,6 +30,23 @@ Scalar fields outside the active allowlist are copied unchanged. Maps, arrays, a
 
 Filenames are also unchanged by default, even when filename and path columns are selected by the table policy. Use `--pseudonymize-filenames` when those values need to be transformed.
 
+### Full-schema field coverage
+
+The built-in policies were reviewed against the [XDR Internals full schema](https://xdrinternals.com/FullSchema-latest.json) on November 9, 2026 (209 tables, 9,474 columns). This is a built-in policy update; collections do not download or execute the external schema.
+
+| Field family | Coverage and relationships |
+| --- | --- |
+| Identity display names | Account, user, actor, owner, recipient, and sender display names share the corresponding identity profile. `IdentityAccountInfo.DisplayName` is selected specifically for that table. |
+| Identity details | `IdentityInfo` and `IdentityAccountInfo` include `GivenName`, `Surname`, `Address`, `Phone`, `Manager`, and `EmployeeId`. Name components use the account's pseudonymous display name; the manager is a separate identity. `IdentityInfo.CompanyName` uses the existing organization mapping. |
+| Account aliases | `AlternateSignInName` shares the sign-in account profile. `AccountId` is selected for `CloudAppEvents`, `IdentityEvents`, and `IdentityAccountInfo`: UPN and username values join the account profile, while GUID values use the existing identifier mapping. AWS account-number columns keep their prior policy. |
+| Alternate contact addresses | `OtherMailAddresses` contains aliases for the account, including when their local parts differ. SIP addresses retain the `sip:` prefix and reuse the email mapping. Agent `OwnerAccountUpns` lists transform each owner separately. |
+| Recipient collections | `EmailEvents.To`, `Cc`, and `DistributionList`, plus ASIM email sender/reply-to and recipient fields, are selected. Arrays, JSON strings, and mailbox objects containing `Address`/`EmailAddress` and `Name`/`DisplayName` retain their structure and metadata. Different recipients remain separate identities and repeated addresses reuse the same mapping. |
+| Directory names | `IdentityInfo.DistinguishedName` links its account CN to the display name and its DC suffix to the account domain. Organization units use organization mappings. Escaped commas and hexadecimal escapes are decoded; malformed names receive an opaque identifier pseudonym. |
+| URLs and DNS | Reviewed URL columns include email/message URLs, redirect chains, file-origin/referrer URLs, request URIs, and site URLs. Domain text reuses the existing domain mappings; unrelated path/query values and IP literals retain the existing behavior. `CloudDnsEvents`, `ASimDnsActivityLogs`, and `DnsAuditEvents` also select `DnsQuery`. |
+| Process and graph names | Additional cloud/CommonSecurityLog process-name columns use filename handling and link to their process command-line family when filename pseudonymization is enabled. Exposure graph node names use their node-type context; node and edge IDs remain available for joins. |
+
+Selected mailbox containers also select their address/name members, even where those member names would be ambiguous outside that container. Generic `DisplayName`, `Address`, `AccountId`, `To`, `Cc`, and URL fields stay outside the unknown-table/query fallback. Activity/resource display names, scope/type metadata, timestamps, hashes, IP-address fields, SIDs, and unrelated IDs retain their prior policy. Explicit `--pseudonym-fields` selections still replace the entire built-in policy.
+
 Pseudonymization is not applied to an existing file passed through `--adx-upload-file`, `--bloodhound-upload-file`, or `--bloodhound-upload-icons-file`.
 
 ## `--pseudonymize-filenames`

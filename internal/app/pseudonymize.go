@@ -553,6 +553,9 @@ func (p *pseudonymizer) PseudonymizeRows(ctx context.Context, rows []map[string]
 }
 
 func (p *pseudonymizer) pseudonymizeValue(ctx context.Context, field string, value any) (any, error) {
+	if p.shouldPseudonymizeField(field) && isMailboxCollectionField(field) {
+		return p.pseudonymizeMailboxCollection(ctx, value)
+	}
 	switch typed := value.(type) {
 	case map[string]any:
 		linkedOverrides := p.primeEntityRelationships(typed)
@@ -569,6 +572,14 @@ func (p *pseudonymizer) pseudonymizeValue(ctx context.Context, field string, val
 				continue
 			}
 			if text, ok := child.(string); ok && p.shouldPseudonymizeField(key) {
+				if isMailboxCollectionField(key) || isDistinguishedNameField(key) {
+					converted, err := p.pseudonymizeString(ctx, key, text)
+					if err != nil {
+						return nil, err
+					}
+					out[key] = converted
+					continue
+				}
 				if isFolderPathField(key) || isPathBearingFilename(key, text) {
 					out[key] = p.pseudonymizePath(key, text)
 					continue
@@ -764,6 +775,16 @@ func (p *pseudonymizer) pseudonymizeString(ctx context.Context, field, value str
 	}
 	selected := p.shouldPseudonymizeField(field)
 	if selected {
+		if isMailboxCollectionField(field) {
+			converted, err := p.pseudonymizeMailboxCollection(ctx, value)
+			if err != nil {
+				return "", err
+			}
+			return converted.(string), nil
+		}
+		if isDistinguishedNameField(field) {
+			return p.pseudonymizeDistinguishedName(value), nil
+		}
 		if isFolderPathField(field) || isPathBearingFilename(field, value) {
 			return p.pseudonymizePath(field, value), nil
 		}
@@ -880,7 +901,7 @@ func entityKindForField(field string) entityKind {
 	if strings.HasSuffix(name, "filename") || strings.HasSuffix(name, "fileinternalname") || strings.HasSuffix(name, "fileoriginalname") || strings.HasSuffix(name, "processname") || name == "zonefile" {
 		return entityFilename
 	}
-	if strings.Contains(name, "emailaddress") || name == "senderfromaddress" || name == "sendermailfromaddress" || strings.HasSuffix(name, "email") || strings.HasSuffix(name, "mailaddress") || strings.HasSuffix(name, "mailaddresses") || strings.HasSuffix(name, "userprincipalname") || strings.HasSuffix(name, "userprincipal") || strings.HasSuffix(name, "upn") {
+	if strings.Contains(name, "emailaddress") || name == "senderfromaddress" || name == "sendermailfromaddress" || name == "emailfromaddress" || name == "emailmailfromaddress" || name == "emailreplytoaddress" || name == "sender" || strings.HasSuffix(name, "email") || strings.HasSuffix(name, "mailaddress") || strings.HasSuffix(name, "mailaddresses") || strings.HasSuffix(name, "userprincipalname") || strings.HasSuffix(name, "userprincipal") || strings.HasSuffix(name, "upn") {
 		return entityEmail
 	}
 	if strings.Contains(name, "iptype") {
@@ -904,7 +925,7 @@ func entityKindForField(field string) entityKind {
 	if strings.HasSuffix(name, "resourcegroup") || strings.HasSuffix(name, "resourcegroupname") {
 		return entityAzureResourceGroup
 	}
-	if strings.HasSuffix(name, "domain") || strings.Contains(name, "domainname") || strings.HasSuffix(name, "dnsname") || strings.HasSuffix(name, "dnsdomain") || strings.HasSuffix(name, "urldomain") || strings.HasSuffix(name, "fqdn") || name == "queryname" || name == "clientprovidedhostheader" {
+	if strings.HasSuffix(name, "domain") || strings.Contains(name, "domainname") || strings.HasSuffix(name, "dnsname") || strings.HasSuffix(name, "dnsdomain") || strings.HasSuffix(name, "urldomain") || strings.HasSuffix(name, "fqdn") || name == "queryname" || name == "dnsquery" || name == "clientprovidedhostheader" {
 		return entityDomain
 	}
 	if name == "computer" || name == "host" || name == "device" || name == "clientname" || name == "workstation" || name == "userworkstations" || strings.Contains(name, "hostname") || strings.Contains(name, "computername") || strings.Contains(name, "devicename") || strings.Contains(name, "machinename") || strings.HasSuffix(name, "workstationname") || strings.HasSuffix(name, "instancevmname") {
@@ -916,14 +937,14 @@ func entityKindForField(field string) entityKind {
 			return entityHostname
 		case strings.Contains(name, "application"), strings.Contains(name, "organization"), strings.Contains(name, "company"):
 			return entityOrganization
-		case strings.Contains(name, "account"), strings.Contains(name, "user"), strings.Contains(name, "owner"), strings.Contains(name, "recipient"), strings.Contains(name, "sender"), strings.Contains(name, "person"):
+		case strings.Contains(name, "account"), strings.Contains(name, "user"), strings.Contains(name, "owner"), strings.Contains(name, "recipient"), strings.Contains(name, "sender"), strings.Contains(name, "person"), strings.Contains(name, "actor"), name == "displayname", name == "activityinitiatordisplayname":
 			return entityPerson
 		}
 	}
-	if strings.Contains(name, "fullname") || strings.Contains(name, "personname") || name == "actorname" || name == "assignedtoname" || name == "createdbyname" || name == "lastmodifiedby" || name == "resolvedby" {
+	if strings.Contains(name, "fullname") || strings.Contains(name, "personname") || name == "actorname" || name == "targetname" || name == "manager" || name == "givenname" || name == "surname" || name == "assignedtoname" || name == "createdbyname" || name == "lastmodifiedby" || name == "resolvedby" {
 		return entityPerson
 	}
-	if strings.Contains(name, "accountname") || strings.Contains(name, "username") || strings.Contains(name, "useraccount") || strings.Contains(name, "loginname") || name == "user" || name == "userid" || name == "account" || name == "targetaccount" || name == "alternatesigninname" || name == "lastloginuser" || name == "actorprincipalname" {
+	if strings.Contains(name, "accountname") || strings.Contains(name, "username") || strings.Contains(name, "useraccount") || strings.Contains(name, "loginname") || name == "user" || name == "userid" || name == "account" || name == "targetaccount" || name == "alternatesigninname" || name == "lastloginuser" || name == "actorprincipalname" || name == "targetprincipalname" {
 		return entityUsername
 	}
 	if name == "resource" {
@@ -966,6 +987,9 @@ func isPathBearingFilename(field, value string) bool {
 
 func entityKindForFieldValue(field, value string) entityKind {
 	kind := entityKindForField(field)
+	if normalizeFieldName(field) == "accountid" && !isExactGUID(value) {
+		kind = entityUsername
+	}
 	if (kind == entityPerson || kind == entityUsername) && isExactEmail(value) {
 		return entityEmail
 	}
@@ -973,6 +997,9 @@ func entityKindForFieldValue(field, value string) entityKind {
 }
 
 func contextualEntityKindForValue(field string, row map[string]any, value string) entityKind {
+	if kind := entityKindForFieldValue(field, value); kind != "" {
+		return kind
+	}
 	kind := contextualEntityKind(field, row)
 	if (kind == entityPerson || kind == entityUsername) && isExactEmail(value) {
 		return entityEmail
@@ -993,13 +1020,14 @@ func isIPAddress(value string) bool {
 }
 
 func isEmbeddedDomainField(field, value string) bool {
-	switch normalizeFieldName(field) {
-	case "remoteurl":
+	name := normalizeFieldName(field)
+	switch name {
+	case "url", "remoteurl", "urlchain", "urloriginal", "crldistributionpointurls":
 		return true
 	case "name":
 		return isIPAddress(value) || domainPattern.MatchString(value)
 	default:
-		return false
+		return strings.HasSuffix(name, "url") || strings.HasSuffix(name, "uri")
 	}
 }
 
@@ -1010,7 +1038,9 @@ func contextualEntityKind(field string, row map[string]any) entityKind {
 	name := normalizeFieldName(field)
 	var typeValue string
 	switch name {
-	case "label", "name", "nodename":
+	case "nodename":
+		typeValue = firstMapString(row, "nodeLabel", "entityType", "type")
+	case "label", "name":
 		typeValue = firstMapString(row, "type", "entityType", "nodeLabel")
 	case "sourcenodename":
 		typeValue = firstMapString(row, "sourceNodeLabel", "sourceNodeType")

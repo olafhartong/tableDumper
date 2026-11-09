@@ -12,12 +12,13 @@ import (
 // semantic field prefix (Account, InitiatingProcessAccount, SenderFrom, etc.)
 // to link the values before the row is transformed.
 type linkedIdentityProfile struct {
-	key       string
-	fields    []linkedIdentityFieldValue
-	people    []string
-	usernames []string
-	emails    []string
-	domains   []string
+	key            string
+	fallbackSource string
+	fields         []linkedIdentityFieldValue
+	people         []string
+	usernames      []string
+	emails         []string
+	domains        []string
 }
 
 type linkedIdentityFieldValue struct {
@@ -66,20 +67,59 @@ func (p *pseudonymizer) primeLinkedIdentities(row map[string]any) map[string]str
 		if !p.shouldPseudonymizeField(field) {
 			continue
 		}
+		// Alternate addresses belong to the account, whereas To/Cc and other
+		// recipient lists can contain many unrelated people.
+		if normalizeFieldName(field) == "othermailaddresses" {
+			profile := identityProfile(profiles, "account")
+			for _, email := range mailboxEmails(row[field]) {
+				local, domain, _ := splitEmail(email)
+				profile.emails = append(profile.emails, email)
+				profile.usernames = append(profile.usernames, local)
+				profile.domains = append(profile.domains, domain)
+			}
+			continue
+		}
 		value, ok := row[field].(string)
 		if !ok {
 			continue
 		}
+		if isDistinguishedNameField(field) {
+			if parts, ok := parseDistinguishedName(value); ok {
+				name, domain := distinguishedNameIdentity(parts)
+				profile := identityProfile(profiles, "account")
+				if name != "" {
+					profile.people = append(profile.people, name)
+				}
+				if domain != "" {
+					profile.domains = append(profile.domains, domain)
+				}
+			}
+			continue
+		}
 		group, kind, ok := linkedIdentityField(field)
+		if normalizeFieldName(field) == "alternatesigninname" && firstMapString(row, "UserPrincipalName") != "" && firstMapString(row, "AccountUpn") == "" {
+			group = "user"
+		}
+		if normalizeFieldName(field) == "accountid" {
+			kind = entityKindForFieldValue(field, value)
+			group, ok = "account", kind != entityIdentifier
+		}
 		if !ok {
 			continue
 		}
-		profile := profiles[group]
-		if profile == nil {
-			profile = &linkedIdentityProfile{key: group}
-			profiles[group] = profile
+		// A list is never a scalar identity. Let the collection transformer
+		// replace its members separately, preserving delimiters and structure.
+		if isMailboxCollectionField(field) || (kind == entityEmail && strings.TrimSpace(value) != "" && !isExactEmail(value)) {
+			continue
 		}
+		if (kind == entityPerson || kind == entityUsername) && isExactEmail(value) {
+			kind = entityEmail
+		}
+		profile := identityProfile(profiles, group)
 		profile.fields = append(profile.fields, linkedIdentityFieldValue{field: field, kind: kind, value: value})
+		if isPersonNameComponent(field) {
+			continue
+		}
 		if strings.TrimSpace(value) == "" {
 			continue
 		}
@@ -101,6 +141,25 @@ func (p *pseudonymizer) primeLinkedIdentities(row map[string]any) map[string]str
 			profile.domains = append(profile.domains, value)
 		}
 	}
+	// GivenName and Surname are components of this account's display name,
+	// not independent aliases for the entire person name.
+	if profile := profiles["account"]; profile != nil {
+		given, surname := "", ""
+		for _, field := range profile.fields {
+			switch normalizeFieldName(field.field) {
+			case "givenname":
+				given = field.value
+			case "surname":
+				surname = field.value
+			}
+		}
+		if full := strings.TrimSpace(given + " " + surname); full != "" {
+			profile.fallbackSource = "name-components:" + full
+			if given != "" && surname != "" {
+				profile.people = append(profile.people, full)
+			}
+		}
+	}
 
 	groups := make([]string, 0, len(profiles))
 	for group := range profiles {
@@ -120,7 +179,17 @@ func (p *pseudonymizer) primeLinkedIdentities(row map[string]any) map[string]str
 		for _, field := range profile.fields {
 			switch field.kind {
 			case entityPerson:
-				overrides[field.field] = replacement.person
+				name := replacement.person
+				parts := strings.Fields(name)
+				if len(parts) > 0 {
+					switch normalizeFieldName(field.field) {
+					case "givenname":
+						name = parts[0]
+					case "surname":
+						name = strings.Join(parts[1:], " ")
+					}
+				}
+				overrides[field.field] = name
 			case entityEmail:
 				_, domain, _ := splitEmail(field.value)
 				overrides[field.field] = replacement.username + "@" + replacement.domainFor(domain)
@@ -138,7 +207,22 @@ func (p *pseudonymizer) primeLinkedIdentities(row map[string]any) map[string]str
 	return overrides
 }
 
+func identityProfile(profiles map[string]*linkedIdentityProfile, group string) *linkedIdentityProfile {
+	if profiles[group] == nil {
+		profiles[group] = &linkedIdentityProfile{key: group}
+	}
+	return profiles[group]
+}
+
+func isPersonNameComponent(field string) bool {
+	name := normalizeFieldName(field)
+	return name == "givenname" || name == "surname"
+}
+
 func profileHasIdentityField(profile *linkedIdentityProfile) bool {
+	if len(profile.emails) > 0 || len(profile.people) > 0 {
+		return true
+	}
 	for _, field := range profile.fields {
 		if field.kind == entityPerson || field.kind == entityUsername || field.kind == entityEmail {
 			return true
@@ -219,6 +303,9 @@ func linkedIdentityFallbackSource(profile *linkedIdentityProfile) string {
 			return profile.key + ":" + values[0]
 		}
 	}
+	if profile.fallbackSource != "" {
+		return profile.fallbackSource
+	}
 	return profile.key + ":missing"
 }
 
@@ -273,6 +360,16 @@ func (p *pseudonymizer) existingLinkedDomainLocked(profile *linkedIdentityProfil
 func linkedIdentityField(field string) (string, entityKind, bool) {
 	name := normalizeFieldName(field)
 	kind := entityKindForField(field)
+	switch name {
+	case "displayname", "givenname", "surname", "emailaddress":
+		return "account", kind, true
+	case "actorname", "actorprincipalname", "actordisplayname":
+		return "actoruser", kind, true
+	case "targetname", "targetprincipalname":
+		return "targetuser", kind, true
+	case "alternatesigninname":
+		return "account", kind, true
+	}
 	switch kind {
 	case entityPerson:
 		switch {
