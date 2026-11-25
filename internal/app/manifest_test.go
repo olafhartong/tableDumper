@@ -472,3 +472,49 @@ func TestPseudonymizedManifestContainsNoOriginals(t *testing.T) {
 		t.Fatal("rejected run collected data before checking the manifest")
 	}
 }
+
+func TestManifestRecordsAbsoluteDumpWindow(t *testing.T) {
+	const start, end = "2026-09-01T00:00:00Z", "2026-09-02T00:00:00.5Z"
+	wantFilter := "DeviceProcessEvents\n| where Timestamp >= datetime(2026-09-01T00:00:00Z) and Timestamp < datetime(2026-09-02T00:00:00.5Z)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(2026-09-02T00:00:00.5Z)"
+	server := newManifestDefenderServer(t, func(w http.ResponseWriter, query string) {
+		if !strings.HasPrefix(query, wantFilter) {
+			t.Errorf("query does not use the absolute window and cutoff: %q", query)
+		}
+		if strings.HasSuffix(query, "\n| count") {
+			io.WriteString(w, `{"Results":[{"Count":1}]}`)
+			return
+		}
+		io.WriteString(w, `{"Schema":[{"Name":"Timestamp","Type":"DateTime"}],"Results":[{"Timestamp":"2026-09-01T08:00:00Z"}]}`)
+	})
+
+	directory := t.TempDir()
+	manifestPath := filepath.Join(directory, "manifest.json")
+	if err := runManifestCollection(t, "--endpoint", server.URL, "--dump-table", "DeviceProcessEvents",
+		"--dump-start", start, "--dump-end", end, "--dump-ingested-before", end,
+		"--output", filepath.Join(directory, "processes.json"), "--manifest", manifestPath); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, _ := readManifest(t, manifestPath)
+	entry := manifestEntry(t, manifest, "defender", "DeviceProcessEvents")
+	wantEnd := time.Date(2026, 9, 2, 0, 0, 0, 500000000, time.UTC)
+	if entry.Window == nil || !entry.Window.Start.Equal(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)) || !entry.Window.End.Equal(wantEnd) || !entry.Window.IngestedBefore.Equal(wantEnd) {
+		t.Fatalf("manifest does not record the absolute window: %#v", entry.Window)
+	}
+}
+
+func TestManifestRecordsRejectedDumpWindow(t *testing.T) {
+	directory := t.TempDir()
+	manifestPath := filepath.Join(directory, "manifest.json")
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	err := runManifestCollection(t, "--endpoint", "http://127.0.0.1:1", "--dump-table", "DeviceProcessEvents",
+		"--dump-start", "2026-09-01T00:00:00Z", "--dump-end", future,
+		"--output", filepath.Join(directory, "processes.json"), "--manifest", manifestPath)
+	if err == nil || !strings.Contains(err.Error(), "before the window end") {
+		t.Fatalf("expected a window error before any query, got %v", err)
+	}
+	manifest, _ := readManifest(t, manifestPath)
+	if entry := manifestEntry(t, manifest, "defender", "DeviceProcessEvents"); entry.Status != manifestNotCaptured || entry.Window != nil {
+		t.Fatalf("rejected window must be recorded as not_captured without a window: %#v", entry)
+	}
+}

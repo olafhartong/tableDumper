@@ -229,6 +229,8 @@ Example:
 
 By default, the lookback filter uses the `Timestamp` column. Use `--dump-time-column` only for tables with a different time column.
 
+Use `--dump-start` and `--dump-end` for a fixed window instead of a lookback ending now, and `--dump-ingested-before` to exclude rows ingested after a given moment. See [the table dump guide](docs/queries-and-dumps.md#--dump-start-and---dump-end).
+
 ## NER-based pseudonymization
 
 Use `--pseudonymize` to transform downloaded rows before the main JSON response or any ADX/OpenGraph sidecar is written. The implementation follows the context-preserving approach from [zolderio/token-proxy](https://github.com/zolderio/token-proxy), adapted for local Defender data collection rather than LLM traffic.
@@ -490,6 +492,14 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 - Default: `30d`
 - Examples: `7d`, `12h`, `90m`
 
+`--dump-start`, `--dump-end`
+- RFC 3339 timestamps for a fixed table-dump window; start inclusive, end exclusive
+- Default: the window ends at the collection start and starts `--dump-lookback` earlier
+
+`--dump-ingested-before`
+- RFC 3339 ingestion-time cutoff for a table dump
+- Default: the collection start
+
 `--dump-time-column`
 - Table time column used for the lookback filter
 - Default: `Timestamp`, or `TimeGenerated` with `--source loganalytics`
@@ -644,6 +654,7 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 - `--adx-batch-size`: defaults to `500`
 - `--dump-table`: dump an entire table by name
 - `--dump-lookback`: defaults to `30d`
+- `--dump-start`, `--dump-end`, `--dump-ingested-before`: fix the dump window and ingestion cutoff to absolute times
 - `--timeout`: defaults to `60s`
 
 `--resource` defaults to Microsoft Graph because the query mode uses the Defender XDR hunting API through Graph.

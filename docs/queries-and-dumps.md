@@ -103,9 +103,50 @@ Accepted values are simple KQL timespan literals such as:
 - `1.5h`
 - `30s`
 
-The collection captures one UTC cutoff before counting. Every table request uses the same half-open window: `Timestamp >= (datetime(cutoff) - lookback) and Timestamp < datetime(cutoff)` (with the configured time column). Every request also excludes rows ingested at or after the cutoff with `isnull(ingestion_time()) or ingestion_time() < datetime(cutoff)`, so events that arrive during the collection cannot change counts between requests. Events can be ingested hours after their event time, so a window that ends near the present misses events that have not arrived yet; use an older window when the most recent hours must be complete. Complex KQL expressions are rejected; use `--query` or `--query-file` when the selection needs a more involved time condition.
+The collection captures one UTC collection start before counting and fixes the window to absolute datetimes. Every table request uses the same half-open window: `Timestamp >= datetime(start) and Timestamp < datetime(end)` (with the configured time column), where `end` is the collection start (or [`--dump-end`](#--dump-start-and---dump-end)) and `start` is `end` minus the lookback. Every request also excludes rows ingested at or after the cutoff with `isnull(ingestion_time()) or ingestion_time() < datetime(cutoff)`, where the cutoff is the collection start (or [`--dump-ingested-before`](#--dump-ingested-before)), so events that arrive during the collection cannot change counts between requests. Events can be ingested hours after their event time, so a window that ends near the present misses events that have not arrived yet; use an older window when the most recent hours must be complete. Complex KQL expressions are rejected; use `--query` or `--query-file` when the selection needs a more involved time condition.
 
 This flag has no effect unless `--dump-table` is set.
+
+## `--dump-start` and `--dump-end`
+
+Fix a table dump window to absolute times instead of a window ending at the collection start. Both take an RFC 3339 timestamp with an explicit offset, such as `2026-09-13T09:58:12Z` or `2026-09-13T11:58:12+02:00`; values are converted to UTC and truncated to microseconds. Default: empty.
+
+```bash
+./tableDumper \
+  --auth azcli \
+  --source loganalytics \
+  --workspace-id <workspace-id> \
+  --dump-table SigninLogs \
+  --dump-start 2026-09-12T00:00:00Z \
+  --dump-end 2026-09-13T09:58:12Z \
+  --output signinlogs.json
+```
+
+- `--dump-start` is inclusive and `--dump-end` exclusive, like the lookback window.
+- Without `--dump-end`, the window ends at the collection start.
+- Without `--dump-start`, the window starts `--dump-lookback` before its end, so `--dump-end 2026-09-13T00:00:00Z --dump-lookback 1d` selects one day. `--dump-start` cannot be combined with an explicit `--dump-lookback`.
+- The start must be before the end, and the end must not be after the ingestion cutoff (see [`--dump-ingested-before`](#--dump-ingested-before)). With the default cutoff, the end therefore cannot lie in the future.
+
+Both flags require `--dump-table`. Free-form queries define their own time range.
+
+## `--dump-ingested-before`
+
+Sets the ingestion-time cutoff of a table dump: rows ingested at or after it are excluded. It takes an RFC 3339 timestamp like [`--dump-end`](#--dump-start-and---dump-end). Default: the collection start.
+
+```bash
+./tableDumper \
+  --dump-table AuditLogs \
+  --source loganalytics \
+  --workspace-id <workspace-id> \
+  --dump-start 2026-09-12T00:00:00Z \
+  --dump-end 2026-09-13T09:58:12Z \
+  --dump-ingested-before 2026-09-13T09:58:12Z \
+  --output auditlogs.json
+```
+
+Use it to reproduce what was available at an earlier moment: with a cutoff equal to `--dump-end`, a late-arriving event for the window is excluded, as it was at that time. The default instead includes every event ingested before the collection started.
+
+The cutoff must not be before the window end, because a window that extends past its cutoff would mix complete and incomplete periods, and it must not be after the collection start, because rows could still arrive during the collection. The flag requires `--dump-table`; add `| where ingestion_time() < datetime(...)` to a free-form query for the same effect.
 
 ## `--dump-time-column`
 
@@ -231,7 +272,7 @@ Rules:
 - Entries are keyed by `source` and `name`. Re-running a table replaces its entry, including replacing a previous `captured` entry with `not_captured` when the new run fails. Tables are sorted by that key.
 - Column types use the Kusto names produced by the ADX export mapping (`string`, `datetime`, `long`, `int`, `real`, `bool`, `guid`, `decimal`, `dynamic`).
 - `file` and `adx_data_file` are relative to the manifest's directory, with forward slashes. Hashes are SHA-256 over the final published files.
-- Table dumps record `time_column` and the fixed half-open `window` used by the query. `window.ingested_before` is the ingestion-time cutoff: rows ingested at or after it were excluded, so events that arrived later for the same window are not in the collection. Query entries have no window.
+- Table dumps record `time_column` and the fixed half-open `window` used by the query. `window.ingested_before` is the ingestion-time cutoff: rows ingested at or after it were excluded, so events that arrived later for the same window are not in the collection. The window and cutoff are the values from `--dump-start`, `--dump-end`, and `--dump-ingested-before` when given. Query entries have no window.
 - The manifest is validated when it is loaded and before it is written, and saved atomically with owner-only `0600` permissions. An existing invalid manifest stops the run before any query is sent.
 - A tool `version` is the module version from the build. Local builds from a Git checkout report a pseudo-version with the commit time and revision, such as `v0.0.0-20260913095812-57c7290a1b2c`, with `+dirty` for modified trees. Builds without module or VCS information record the revision if known, otherwise `(devel)` or `unknown`.
 - Runs are not locked against each other. Do not run collections that share a manifest concurrently.

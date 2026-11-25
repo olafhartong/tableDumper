@@ -121,8 +121,7 @@ type manifestResult struct {
 	query      string
 	// Table dumps record their fixed window; queries leave these empty.
 	timeColumn string
-	lookback   string
-	cutoff     time.Time
+	window     *dumpWindow
 	output     tableDumpOutput
 	outputPath string
 	err        error
@@ -169,14 +168,10 @@ func (r *manifestRun) Record(result manifestResult) error {
 
 func (r *manifestRun) tableEntry(result manifestResult) (manifestTable, error) {
 	entry := manifestTable{Source: result.sourceName, Name: result.table}
-	if result.lookback != "" {
-		lookback, err := kqlTimespanDuration(result.lookback)
-		if err != nil {
-			return entry, err
-		}
-		// Matches the query filter built by buildTableDumpBaseQuery.
-		end := result.cutoff.UTC().Truncate(time.Microsecond)
-		entry.TimeColumn, entry.Window = result.timeColumn, &manifestWindow{Start: end.Add(-lookback), End: end, IngestedBefore: end}
+	if result.window != nil {
+		// The same window that buildTableDumpBaseQuery filters on.
+		entry.TimeColumn = result.timeColumn
+		entry.Window = &manifestWindow{Start: result.window.Start, End: result.window.End, IngestedBefore: result.window.IngestedBefore}
 	}
 	if !r.pseudonymization.Enabled {
 		// Incident queries filter on real identifiers, so query text is only
