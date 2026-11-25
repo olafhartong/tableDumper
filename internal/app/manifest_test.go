@@ -518,3 +518,62 @@ func TestManifestRecordsRejectedDumpWindow(t *testing.T) {
 		t.Fatalf("rejected window must be recorded as not_captured without a window: %#v", entry)
 	}
 }
+
+func TestManifestRecordsLabelsAndDeclaredQueryWindow(t *testing.T) {
+	queries := 0
+	server := newManifestDefenderServer(t, func(w http.ResponseWriter, query string) {
+		queries++
+		if strings.HasSuffix(query, "\n| count") {
+			io.WriteString(w, `{"Results":[{"Count":1}]}`)
+			return
+		}
+		io.WriteString(w, `{"Schema":[{"Name":"Timestamp","Type":"DateTime"}],"Results":[{"Timestamp":"2026-09-01T08:00:00Z"}]}`)
+	})
+
+	directory := t.TempDir()
+	manifestPath := filepath.Join(directory, "manifest.json")
+	query := func(table string, extra ...string) error {
+		return runManifestCollection(t, append([]string{"--endpoint", server.URL, "--query", "DeviceProcessEvents | where Timestamp > datetime(2026-09-01)",
+			"--output", filepath.Join(directory, strings.ToLower(table)+".json"), "--manifest", manifestPath, "--manifest-table", table}, extra...)...)
+	}
+	if err := query("IncidentProcesses", "--manifest-label", "ticket=CHG-0042", "--manifest-label", "purpose=review",
+		"--manifest-window-start", "2026-09-01T00:00:00Z", "--manifest-window-end", "2026-09-02T00:00:00Z", "--manifest-ingested-before", "2026-09-02T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	// A later run may add labels and need not repeat existing ones.
+	if err := query("IncidentLogons", "--manifest-label", "requested_by=soc"); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, _ := readManifest(t, manifestPath)
+	if len(manifest.Labels) != 3 || manifest.Labels["ticket"] != "CHG-0042" || manifest.Labels["purpose"] != "review" || manifest.Labels["requested_by"] != "soc" {
+		t.Fatalf("unexpected labels %#v", manifest.Labels)
+	}
+	entry := manifestEntry(t, manifest, "defender", "IncidentProcesses")
+	end := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
+	if entry.TimeColumn != "Timestamp" || entry.Window == nil || !entry.Window.Declared || !entry.Window.Start.Equal(end.AddDate(0, 0, -1)) || !entry.Window.End.Equal(end) || !entry.Window.IngestedBefore.Equal(end) {
+		t.Fatalf("declared window not recorded: %q %#v", entry.TimeColumn, entry.Window)
+	}
+	if other := manifestEntry(t, manifest, "defender", "IncidentLogons"); other.Window != nil || other.TimeColumn != "" {
+		t.Fatalf("query without a declared window must not record one: %#v", other)
+	}
+
+	before := queries
+	if err := query("IncidentAlerts", "--manifest-label", "ticket=CHG-0043"); err == nil || !strings.Contains(err.Error(), "label ticket with a different value") {
+		t.Fatalf("expected a conflicting label to be rejected, got %v", err)
+	}
+	if queries != before {
+		t.Fatalf("a conflicting label must be rejected before any query is sent")
+	}
+}
+
+func TestManifestRejectsInvalidStoredLabel(t *testing.T) {
+	manifestPath := filepath.Join(t.TempDir(), "manifest.json")
+	body := `{"schema_version":1,"tool":{"name":"tableDumper","version":"v"},"created_at":"2026-09-13T09:58:12Z","updated_at":"2026-09-13T09:58:12Z","pseudonymization":{"enabled":false},"labels":{"ticket id":"x"},"tables":[]}`
+	if err := os.WriteFile(manifestPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadCollectionManifest(manifestPath); err == nil || !strings.Contains(err.Error(), "label") {
+		t.Fatalf("expected an invalid label error, got %v", err)
+	}
+}

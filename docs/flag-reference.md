@@ -25,6 +25,11 @@ This page lists every flag registered by the application. Follow the guide link 
 | `--output` | path | `results.json` | Set the main Defender query or dump output path. | [Output](queries-and-dumps.md#--output) |
 | `--manifest` | path | empty | Create or update a collection manifest recording what each query or table dump captured. | [Manifest](queries-and-dumps.md#--manifest) |
 | `--manifest-table` | identifier | empty; required for query input with `--manifest` | Name recorded in the manifest for a query result. | [Manifest](queries-and-dumps.md#--manifest-table) |
+| `--manifest-label` | `key=value`, repeatable | none | Record a label on the whole collection in the manifest. | [Manifest](queries-and-dumps.md#--manifest-label) |
+| `--manifest-window-start` | RFC 3339 timestamp | empty | Record the inclusive start of the window a query selects. | [Manifest](queries-and-dumps.md#--manifest-window-start-and---manifest-window-end) |
+| `--manifest-window-end` | RFC 3339 timestamp | empty | Record the exclusive end of the window a query selects. | [Manifest](queries-and-dumps.md#--manifest-window-start-and---manifest-window-end) |
+| `--manifest-ingested-before` | RFC 3339 timestamp | empty | Record the ingestion-time cutoff a query applies. | [Manifest](queries-and-dumps.md#--manifest-window-start-and---manifest-window-end) |
+| `--manifest-time-column` | identifier | `Timestamp`, or `TimeGenerated` with `--source loganalytics` | Record the column a declared query window applies to. | [Manifest](queries-and-dumps.md#--manifest-window-start-and---manifest-window-end) |
 | `--adx-export` | boolean | `false` | Generate ADX NDJSON and KQL sidecars for collected results. | [ADX export](azure-data-explorer.md#--adx-export) |
 | `--opengraph-export` | boolean | `false` | Generate BloodHound OpenGraph and icon sidecars. | [OpenGraph](bloodhound-and-opengraph.md#--opengraph-export) |
 | `--adx-cluster` | URI | `ADX_CLUSTER` | ADX engine cluster used for direct upload. | [ADX upload](azure-data-explorer.md#--adx-cluster) |

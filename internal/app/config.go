@@ -79,6 +79,11 @@ type config struct {
 	PseudonymMapRetention     string
 	Manifest                  string
 	ManifestTable             string
+	ManifestLabels            map[string]string
+	ManifestTimeColumn        string
+	ManifestWindowStart       time.Time
+	ManifestWindowEnd         time.Time
+	ManifestIngestedBefore    time.Time
 	Endpoint                  string
 	Resource                  string
 	LoginBaseURL              string
@@ -119,6 +124,13 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	fs.StringVar(&cfg.Output, "output", defaultOutputFile, "Path to the JSON output file")
 	fs.StringVar(&cfg.Manifest, "manifest", "", "Path to a collection manifest JSON file to create or update with what this run captured")
 	fs.StringVar(&cfg.ManifestTable, "manifest-table", "", "Table name recorded in -manifest for -query or -query-file results")
+	labels := manifestLabelFlag{}
+	fs.Var(labels, "manifest-label", "Collection label key=value recorded in -manifest; repeat for several labels")
+	var manifestWindowStart, manifestWindowEnd, manifestIngestedBefore string
+	fs.StringVar(&cfg.ManifestTimeColumn, "manifest-time-column", "", "Time column recorded with the -manifest-window-start/-end of a query (default: the -dump-time-column default for -source)")
+	fs.StringVar(&manifestWindowStart, "manifest-window-start", "", "RFC 3339 start of the time window a -query or -query-file selects, recorded in -manifest")
+	fs.StringVar(&manifestWindowEnd, "manifest-window-end", "", "RFC 3339 exclusive end of the time window a -query or -query-file selects, recorded in -manifest")
+	fs.StringVar(&manifestIngestedBefore, "manifest-ingested-before", "", "RFC 3339 ingestion-time cutoff a -query or -query-file applies, recorded in -manifest")
 	fs.BoolVar(&cfg.ADXExport, "adx-export", false, "Also write Azure Data Explorer ingestion artifacts")
 	fs.BoolVar(&cfg.OpenGraphExport, "opengraph-export", false, "Also write a BloodHound OpenGraph JSON payload")
 	fs.StringVar(&cfg.ADXCluster, "adx-cluster", envOrDotEnvAny(dotenv, "ADX_CLUSTER"), "ADX cluster URI, for example https://<cluster>.<region>.kusto.windows.net")
@@ -366,6 +378,15 @@ func parseFlags(args []string, stderr io.Writer) (config, error) {
 	if cfg.ManifestTable != "" && cfg.Manifest == "" {
 		return cfg, errors.New("-manifest-table requires -manifest")
 	}
+	if len(labels) > 0 {
+		if cfg.Manifest == "" {
+			return cfg, errors.New("-manifest-label requires -manifest")
+		}
+		cfg.ManifestLabels = labels
+	}
+	if err := parseManifestWindowFlags(&cfg, fs, manifestWindowStart, manifestWindowEnd, manifestIngestedBefore); err != nil {
+		return cfg, err
+	}
 	if cfg.Manifest != "" {
 		switch {
 		case cfg.DumpTable == "" && !hasQueryInput(cfg):
@@ -598,6 +619,78 @@ func parseDumpTime(value string) (time.Time, error) {
 		return time.Time{}, errors.New("use an RFC 3339 timestamp such as 2026-09-13T09:58:12Z")
 	}
 	return parsed.UTC().Truncate(time.Microsecond), nil
+}
+
+// manifestLabelFlag collects repeated -manifest-label key=value flags.
+type manifestLabelFlag map[string]string
+
+func (f manifestLabelFlag) String() string { return "" }
+
+func (f manifestLabelFlag) Set(value string) error {
+	key, label, ok := strings.Cut(value, "=")
+	if !ok {
+		return errors.New("use key=value")
+	}
+	if err := validateManifestLabel(key, label); err != nil {
+		return err
+	}
+	if _, exists := f[key]; exists {
+		return fmt.Errorf("label %q is given more than once", key)
+	}
+	f[key] = label
+	return nil
+}
+
+// parseManifestWindowFlags parses the window a free-form query declares. The
+// tool cannot apply it to an arbitrary pipeline, so it is only recorded.
+func parseManifestWindowFlags(cfg *config, fs *flag.FlagSet, start, end, ingestedBefore string) error {
+	set := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { set[f.Name] = true })
+	values := []struct {
+		name  string
+		value string
+		dest  *time.Time
+	}{
+		{"manifest-window-start", start, &cfg.ManifestWindowStart},
+		{"manifest-window-end", end, &cfg.ManifestWindowEnd},
+		{"manifest-ingested-before", ingestedBefore, &cfg.ManifestIngestedBefore},
+	}
+	given := set["manifest-time-column"]
+	for _, v := range values {
+		if !set[v.name] {
+			continue
+		}
+		given = true
+		parsed, err := parseDumpTime(v.value)
+		if err != nil {
+			return fmt.Errorf("invalid -%s value %q: %w", v.name, v.value, err)
+		}
+		*v.dest = parsed
+	}
+	if !given {
+		return nil
+	}
+	switch {
+	case cfg.Manifest == "" || !hasQueryInput(*cfg):
+		return errors.New("-manifest-window-start, -manifest-window-end, -manifest-ingested-before, and -manifest-time-column require -manifest with -query or -query-file; table dumps record their own window")
+	case !set["manifest-window-start"] || !set["manifest-window-end"]:
+		return errors.New("-manifest-window-start and -manifest-window-end must be given together")
+	case !cfg.ManifestWindowStart.Before(cfg.ManifestWindowEnd):
+		return errors.New("-manifest-window-start must be before -manifest-window-end")
+	case !cfg.ManifestIngestedBefore.IsZero() && cfg.ManifestIngestedBefore.Before(cfg.ManifestWindowEnd):
+		return errors.New("-manifest-ingested-before must not be before -manifest-window-end")
+	}
+	cfg.ManifestTimeColumn = strings.TrimSpace(cfg.ManifestTimeColumn)
+	if cfg.ManifestTimeColumn == "" {
+		cfg.ManifestTimeColumn = defaultDumpTimeColumn
+		if cfg.Source == sourceLogAnalytics {
+			cfg.ManifestTimeColumn = logAnalyticsTimeColumn
+		}
+	}
+	if !isSafeADXIdentifier(cfg.ManifestTimeColumn) {
+		return fmt.Errorf("invalid -manifest-time-column value %q; use only letters, numbers, and underscores, starting with a letter or underscore", cfg.ManifestTimeColumn)
+	}
+	return nil
 }
 
 func hasQueryInput(cfg config) bool {

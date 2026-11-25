@@ -112,7 +112,7 @@ Detailed documentation for every command-line flag is available in [docs/README.
   --output incident/alerts.json --manifest incident/manifest.json --manifest-table IncidentAlerts
 ```
 
-Each run adds or replaces one table entry with status `captured`, `captured_empty`, `not_captured`, or `absent_in_source`, plus its columns, row count, window, and file hashes. With `--pseudonymize`, the manifest records the vault `key_id` and no original values. See [the manifest guide](docs/queries-and-dumps.md#--manifest).
+Each run adds or replaces one table entry with status `captured`, `captured_empty`, `not_captured`, or `absent_in_source`, plus its columns, row count, window, and file hashes. With `--pseudonymize`, the manifest records the vault `key_id` and no original values. `--manifest-label key=value` labels the collection, and `--manifest-window-start`/`--manifest-window-end` record the window a query selects. See [the manifest guide](docs/queries-and-dumps.md#--manifest).
 
 ### 8. Pseudonymize a collection
 
@@ -522,6 +522,12 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 `--manifest-table`
 - Table name recorded in `--manifest` for query results
 - Required with `--manifest` and `--query`/`--query-file`
+
+`--manifest-label`
+- `key=value` label recorded on the whole collection in `--manifest`; repeatable
+
+`--manifest-window-start`, `--manifest-window-end`, `--manifest-ingested-before`, `--manifest-time-column`
+- Window and ingestion cutoff a `--query`/`--query-file` selects, recorded in `--manifest` with `"declared": true`; the query must apply them itself
 
 `--pseudonymize`
 - Apply embedded NER and identifier pseudonymization before collected data is written

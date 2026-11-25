@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const collectionManifestSchemaVersion = 1
@@ -34,7 +35,9 @@ type collectionManifest struct {
 	CreatedAt        time.Time                `json:"created_at"`
 	UpdatedAt        time.Time                `json:"updated_at"`
 	Pseudonymization manifestPseudonymization `json:"pseudonymization"`
-	Tables           []manifestTable          `json:"tables"`
+	// Labels describe the collection as a whole, for example a ticket number.
+	Labels map[string]string `json:"labels,omitempty"`
+	Tables []manifestTable   `json:"tables"`
 }
 
 type manifestTool struct {
@@ -72,6 +75,9 @@ type manifestWindow struct {
 	// IngestedBefore excludes rows ingested at or after it, so the recorded
 	// counts describe one snapshot of the window.
 	IngestedBefore time.Time `json:"ingested_before,omitzero"`
+	// Declared marks a window that a free-form query states it selects. The
+	// tool records it but does not apply it to the query.
+	Declared bool `json:"declared,omitempty"`
 }
 
 type manifestColumn struct {
@@ -83,12 +89,13 @@ type manifestColumn struct {
 type manifestRun struct {
 	path             string
 	pseudonymization manifestPseudonymization
+	labels           map[string]string
 }
 
 // openManifestRun validates an existing manifest before any data is collected,
 // so a corrupt file or a different pseudonymization setup fails immediately.
-func openManifestRun(path string, pseudonyms *pseudonymizer) (*manifestRun, error) {
-	run := &manifestRun{path: path}
+func openManifestRun(path string, pseudonyms *pseudonymizer, labels map[string]string) (*manifestRun, error) {
+	run := &manifestRun{path: path, labels: labels}
 	if pseudonyms != nil {
 		run.pseudonymization = manifestPseudonymization{Enabled: true, Mode: "reversible", KeyID: pseudonyms.KeyID()}
 		if pseudonyms.Irreversible() {
@@ -109,6 +116,11 @@ func (r *manifestRun) load() (*collectionManifest, error) {
 	if manifest.Pseudonymization != r.pseudonymization {
 		return nil, fmt.Errorf("manifest %s records a different pseudonymization setup (enabled, mode, or vault key_id); use one manifest per consistently pseudonymized collection", r.path)
 	}
+	for key, value := range r.labels {
+		if existing, ok := manifest.Labels[key]; ok && existing != value {
+			return nil, fmt.Errorf("manifest %s records label %s with a different value; labels describe the whole collection and cannot change between runs", r.path, key)
+		}
+	}
 	return manifest, nil
 }
 
@@ -122,6 +134,8 @@ type manifestResult struct {
 	// Table dumps record their fixed window; queries leave these empty.
 	timeColumn string
 	window     *dumpWindow
+	// declared marks a query's stated window, which the tool did not apply.
+	declared   bool
 	output     tableDumpOutput
 	outputPath string
 	err        error
@@ -153,6 +167,12 @@ func (r *manifestRun) Record(result manifestResult) error {
 	manifest.SchemaVersion = collectionManifestSchemaVersion
 	manifest.Tool = manifestTool{Name: "tableDumper", Version: toolVersion()}
 	manifest.UpdatedAt = now
+	for key, value := range r.labels {
+		if manifest.Labels == nil {
+			manifest.Labels = make(map[string]string, len(r.labels))
+		}
+		manifest.Labels[key] = value
+	}
 	tables := manifest.Tables[:0]
 	for _, table := range manifest.Tables {
 		if table.Source != entry.Source || table.Name != entry.Name {
@@ -171,7 +191,7 @@ func (r *manifestRun) tableEntry(result manifestResult) (manifestTable, error) {
 	if result.window != nil {
 		// The same window that buildTableDumpBaseQuery filters on.
 		entry.TimeColumn = result.timeColumn
-		entry.Window = &manifestWindow{Start: result.window.Start, End: result.window.End, IngestedBefore: result.window.IngestedBefore}
+		entry.Window = &manifestWindow{Start: result.window.Start, End: result.window.End, IngestedBefore: result.window.IngestedBefore, Declared: result.declared}
 	}
 	if !r.pseudonymization.Enabled {
 		// Incident queries filter on real identifiers, so query text is only
@@ -306,6 +326,11 @@ func validateCollectionManifest(manifest *collectionManifest) error {
 	default:
 		return errors.New("pseudonymization must be disabled without mode or key_id, or enabled with a mode and a 16-character key_id")
 	}
+	for key, value := range manifest.Labels {
+		if err := validateManifestLabel(key, value); err != nil {
+			return fmt.Errorf("label %q: %w", key, err)
+		}
+	}
 	seen := make(map[string]bool, len(manifest.Tables))
 	for i, table := range manifest.Tables {
 		if err := validateManifestTable(table); err != nil {
@@ -321,6 +346,32 @@ func validateCollectionManifest(manifest *collectionManifest) error {
 		seen[key] = true
 	}
 	return nil
+}
+
+// validateManifestLabel accepts short, printable labels with identifier keys.
+func validateManifestLabel(key, value string) error {
+	if !isSafeManifestLabelKey(key) {
+		return errors.New("label keys must start with a letter or underscore and contain at most 64 letters, digits, underscores, dots, or hyphens")
+	}
+	if value == "" || len(value) > 256 || strings.IndexFunc(value, func(r rune) bool { return !unicode.IsPrint(r) }) >= 0 {
+		return errors.New("label values must be 1 to 256 bytes of printable text")
+	}
+	return nil
+}
+
+func isSafeManifestLabelKey(key string) bool {
+	if key == "" || len(key) > 64 {
+		return false
+	}
+	for i, r := range key {
+		switch {
+		case r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z'):
+		case i > 0 && ((r >= '0' && r <= '9') || r == '.' || r == '-'):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func validateManifestTable(table manifestTable) error {

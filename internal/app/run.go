@@ -74,7 +74,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 
 	var manifest *manifestRun
 	if cfg.Manifest != "" {
-		if manifest, err = openManifestRun(cfg.Manifest, pseudonyms); err != nil {
+		if manifest, err = openManifestRun(cfg.Manifest, pseudonyms, cfg.ManifestLabels); err != nil {
 			return err
 		}
 	}
@@ -85,6 +85,10 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return err
 		}
 		record := manifestResult{sourceName: cfg.Source, table: cfg.ManifestTable, query: query, outputPath: cfg.Output}
+		if !cfg.ManifestWindowStart.IsZero() {
+			record.timeColumn, record.declared = cfg.ManifestTimeColumn, true
+			record.window = &dumpWindow{Start: cfg.ManifestWindowStart, End: cfg.ManifestWindowEnd, IngestedBefore: cfg.ManifestIngestedBefore}
+		}
 
 		source, authMode, err := newQuerySource(ctx, httpClient, cfg)
 		if err != nil {
