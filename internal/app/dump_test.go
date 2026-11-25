@@ -328,7 +328,7 @@ func TestDumpTableRejectsSingleQueryRowCountMismatch(t *testing.T) {
 		Output:         filepath.Join(directory, "deviceinfo.json"),
 	}
 
-	_, err = dumpTable(context.Background(), server.Client(), cfg, "token-value", pseudonyms, io.Discard)
+	_, err = dumpTable(context.Background(), newDefenderQuerySource(server.Client(), server.URL, "token-value"), cfg, pseudonyms, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "dump DeviceInfo returned 2 rows, expected 3") {
 		t.Fatalf("expected row count mismatch error, got %v", err)
 	}

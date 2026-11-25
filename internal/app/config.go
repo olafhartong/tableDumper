@@ -15,13 +15,17 @@ import (
 )
 
 const (
-	defaultEndpoint     = "https://graph.microsoft.com/v1.0"
-	defaultResource     = "https://graph.microsoft.com"
-	defaultADXResource  = "https://api.kusto.windows.net"
-	defaultLoginBaseURL = "https://login.microsoftonline.com"
-	defaultOutputFile   = "results.json"
-	defaultDumpLookback = "30d"
-	defaultDumpRowLimit = 30000
+	defaultEndpoint             = "https://graph.microsoft.com/v1.0"
+	defaultResource             = "https://graph.microsoft.com"
+	defaultLogAnalyticsEndpoint = "https://api.loganalytics.azure.com/v1"
+	defaultLogAnalyticsResource = "https://api.loganalytics.io"
+	defaultADXResource          = "https://api.kusto.windows.net"
+	defaultLoginBaseURL         = "https://login.microsoftonline.com"
+	defaultOutputFile           = "results.json"
+	defaultDumpLookback         = "30d"
+	defaultDumpRowLimit         = 30000
+	defaultDumpTimeColumn       = "Timestamp"
+	logAnalyticsTimeColumn      = "TimeGenerated"
 	// Advanced hunting silently returns at most this many rows with HTTP 200.
 	maxDumpRowLimit = 100000
 )
