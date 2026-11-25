@@ -16,6 +16,9 @@ This page lists every flag registered by the application. Follow the guide link 
 | `--query-file` | path | empty | Read the KQL query from a UTF-8 text file. | [Queries](queries-and-dumps.md#--query-file) |
 | `--dump-table` | identifier | empty | Collect a whole advanced hunting or Log Analytics table over a lookback window. | [Table dumps](queries-and-dumps.md#--dump-table) |
 | `--dump-lookback` | KQL timespan | `30d` | Set the time window for a table dump. | [Table dumps](queries-and-dumps.md#--dump-lookback) |
+| `--dump-start` | RFC 3339 timestamp | empty | Start a table dump window at a fixed time (inclusive); replaces `--dump-lookback`. | [Table dumps](queries-and-dumps.md#--dump-start-and---dump-end) |
+| `--dump-end` | RFC 3339 timestamp | collection start | End a table dump window at a fixed time (exclusive). | [Table dumps](queries-and-dumps.md#--dump-start-and---dump-end) |
+| `--dump-ingested-before` | RFC 3339 timestamp | collection start | Exclude rows ingested at or after this time from a table dump. | [Table dumps](queries-and-dumps.md#--dump-ingested-before) |
 | `--dump-time-column` | identifier | `Timestamp` | Select the table column used for lookback filtering. | [Table dumps](queries-and-dumps.md#--dump-time-column) |
 | `--dump-row-limit` | integer `1`-`100000` | `30000` | Set the query and table-dump threshold that triggers hash partitioning. | [Queries and dumps](queries-and-dumps.md#--dump-row-limit) |
 | `--dump-parallelism` | positive integer | `1` | Deprecated compatibility option; requests remain sequential. | [Table dumps](queries-and-dumps.md#--dump-parallelism) |

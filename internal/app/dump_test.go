@@ -18,26 +18,70 @@ import (
 )
 
 func TestBuildTableDumpQueries(t *testing.T) {
-	base := buildTableDumpBaseQuery("DeviceEvents", "Timestamp", "30d", time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC))
-	if base != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(2026-09-09T12:00:00Z)" {
+	end := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	base := buildTableDumpBaseQuery("DeviceEvents", "Timestamp", dumpWindow{Start: end.AddDate(0, 0, -30), End: end, IngestedBefore: end})
+	if base != "DeviceEvents\n| where Timestamp >= datetime(2026-08-10T12:00:00Z) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(2026-09-09T12:00:00Z)" {
 		t.Fatalf("unexpected base query %q", base)
 	}
-	if got := buildTableDumpCountQuery(base); got != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(2026-09-09T12:00:00Z)\n| count" {
+	if got := buildTableDumpCountQuery(base); got != "DeviceEvents\n| where Timestamp >= datetime(2026-08-10T12:00:00Z) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(2026-09-09T12:00:00Z)\n| count" {
 		t.Fatalf("unexpected count query %q", got)
 	}
-	if got := buildTableDumpPartitionCountQuery(base, `tostring(pack_array(tostring(["EventId"])))`, 4); got != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(2026-09-09T12:00:00Z)\n| summarize Count=count() by DumpPartition=(tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 4)" {
+	if got := buildTableDumpPartitionCountQuery(base, `tostring(pack_array(tostring(["EventId"])))`, 4); got != "DeviceEvents\n| where Timestamp >= datetime(2026-08-10T12:00:00Z) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(2026-09-09T12:00:00Z)\n| summarize Count=count() by DumpPartition=(tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 4)" {
 		t.Fatalf("unexpected partition count query %q", got)
 	}
-	if got := buildTableDumpPartitionQuery(base, `tostring(pack_array(tostring(["EventId"])))`, 4, 2); got != "DeviceEvents\n| where Timestamp >= (datetime(2026-09-09T12:00:00Z) - 30d) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(2026-09-09T12:00:00Z)\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 4) == 2" {
+	if got := buildTableDumpPartitionQuery(base, `tostring(pack_array(tostring(["EventId"])))`, 4, 2); got != "DeviceEvents\n| where Timestamp >= datetime(2026-08-10T12:00:00Z) and Timestamp < datetime(2026-09-09T12:00:00Z)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(2026-09-09T12:00:00Z)\n| where (tolong(strcat('0x', substring(hash_sha256(tostring(pack_array(tostring([\"EventId\"])))), 0, 15))) % 4) == 2" {
 		t.Fatalf("unexpected partition query %q", got)
 	}
 }
 
 func TestTableDumpCutoffUsesUTCAndSupportedPrecision(t *testing.T) {
 	cutoff := time.Date(2026, 9, 9, 14, 0, 0, 123456789, time.FixedZone("test", 2*60*60))
-	query := buildTableDumpBaseQuery("Events", "Timestamp", "1h", cutoff)
-	if strings.Count(query, "datetime(2026-09-09T12:00:00.123456Z)") != 3 || strings.Contains(query, "ago(") {
+	window, err := resolveDumpWindow(config{DumpLookback: "1h"}, cutoff)
+	if err != nil {
+		t.Fatalf("resolveDumpWindow returned error: %v", err)
+	}
+	query := buildTableDumpBaseQuery("Events", "Timestamp", window)
+	if strings.Count(query, "datetime(2026-09-09T12:00:00.123456Z)") != 2 || !strings.Contains(query, "datetime(2026-09-09T11:00:00.123456Z)") || strings.Contains(query, "ago(") {
 		t.Fatalf("window is not fixed at a supported UTC precision: %s", query)
+	}
+}
+
+func TestResolveDumpWindow(t *testing.T) {
+	now := time.Date(2026, 9, 13, 10, 0, 0, 0, time.UTC)
+	start := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 9, 2, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name string
+		cfg  config
+		want dumpWindow
+		err  string
+	}{
+		{name: "lookback ending now", cfg: config{DumpLookback: "1d"}, want: dumpWindow{Start: now.AddDate(0, 0, -1), End: now, IngestedBefore: now}},
+		{name: "lookback ending at end", cfg: config{DumpLookback: "1d", DumpEnd: end}, want: dumpWindow{Start: start, End: end, IngestedBefore: now}},
+		{name: "start and end", cfg: config{DumpLookback: "30d", DumpStart: start, DumpEnd: end}, want: dumpWindow{Start: start, End: end, IngestedBefore: now}},
+		{name: "start ending now", cfg: config{DumpLookback: "30d", DumpStart: start}, want: dumpWindow{Start: start, End: now, IngestedBefore: now}},
+		{name: "cutoff at end", cfg: config{DumpStart: start, DumpEnd: end, DumpIngestedBefore: end}, want: dumpWindow{Start: start, End: end, IngestedBefore: end}},
+		{name: "cutoff after now", cfg: config{DumpStart: start, DumpEnd: end, DumpIngestedBefore: now.Add(time.Second)}, err: "after the collection start"},
+		{name: "end after now", cfg: config{DumpStart: start, DumpEnd: now.Add(time.Hour)}, err: "before the window end"},
+		{name: "cutoff before end", cfg: config{DumpStart: start, DumpEnd: end, DumpIngestedBefore: end.Add(-time.Second)}, err: "before the window end"},
+		{name: "start after now", cfg: config{DumpStart: now.Add(time.Hour)}, err: "is not before its end"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveDumpWindow(tt.cfg, now)
+			if tt.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.err) {
+					t.Fatalf("expected error containing %q, got %v (%v)", tt.err, err, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveDumpWindow returned error: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -279,7 +323,7 @@ func TestDumpTableWithHashPartitioning(t *testing.T) {
 
 	progressText := progress.String()
 	for _, want := range []string{
-		"counting rows in DeviceEvents over 7d",
+		"counting rows in DeviceEvents over [",
 		"found 9 row(s) to dump",
 		"counting rows across 3 hash partition(s)",
 		"dumping 3 non-empty partition chunk(s) sequentially",

@@ -36,18 +36,68 @@ type partitionCount struct {
 	Rows      int
 }
 
-func dumpTable(ctx context.Context, source querySource, cfg config, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
-	return dumpTableAt(ctx, source, cfg, time.Now().UTC(), pseudonyms, progress)
+// dumpWindow is the fixed selection of a table dump: rows whose time column
+// falls in [Start, End) and that were ingested before IngestedBefore.
+type dumpWindow struct {
+	Start          time.Time
+	End            time.Time
+	IngestedBefore time.Time
 }
 
-// dumpTableAt dumps the lookback window ending at cutoff.
-func dumpTableAt(ctx context.Context, source querySource, cfg config, cutoff time.Time, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
-	baseQuery := buildTableDumpBaseQuery(cfg.DumpTable, cfg.DumpTimeColumn, cfg.DumpLookback, cutoff)
-	source, err := withTableDumpTimespan(source, cfg, cutoff, progress)
+func (w dumpWindow) String() string {
+	return fmt.Sprintf("[%s, %s) ingested before %s", w.Start.Format(time.RFC3339Nano), w.End.Format(time.RFC3339Nano), w.IngestedBefore.Format(time.RFC3339Nano))
+}
+
+// resolveDumpWindow fixes the dump window against the collection start. The
+// end and the ingestion cutoff default to the collection start, and the start
+// defaults to the end minus -dump-lookback.
+func resolveDumpWindow(cfg config, collectionStart time.Time) (dumpWindow, error) {
+	// Kusto datetime precision is 100 ns; use microseconds so Go's nanosecond
+	// formatting never produces an unsupported nine-digit fractional second.
+	now := collectionStart.UTC().Truncate(time.Microsecond)
+	window := dumpWindow{Start: cfg.DumpStart, End: cfg.DumpEnd, IngestedBefore: cfg.DumpIngestedBefore}
+	if window.End.IsZero() {
+		window.End = now
+	}
+	if window.IngestedBefore.IsZero() {
+		window.IngestedBefore = now
+	}
+	if window.Start.IsZero() {
+		lookback, err := kqlTimespanDuration(cfg.DumpLookback)
+		if err != nil {
+			return dumpWindow{}, err
+		}
+		window.Start = window.End.Add(-lookback)
+	}
+	switch {
+	case !window.Start.Before(window.End):
+		return dumpWindow{}, fmt.Errorf("dump window start %s is not before its end %s", window.Start.Format(time.RFC3339Nano), window.End.Format(time.RFC3339Nano))
+	case window.IngestedBefore.After(now):
+		// Rows can still arrive before a future cutoff, so requests made during
+		// the collection could disagree about which rows exist.
+		return dumpWindow{}, fmt.Errorf("ingestion cutoff %s is after the collection start %s", window.IngestedBefore.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	case window.IngestedBefore.Before(window.End):
+		return dumpWindow{}, fmt.Errorf("ingestion cutoff %s is before the window end %s; the window end must not be after the cutoff", window.IngestedBefore.Format(time.RFC3339Nano), window.End.Format(time.RFC3339Nano))
+	}
+	return window, nil
+}
+
+func dumpTable(ctx context.Context, source querySource, cfg config, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
+	window, err := resolveDumpWindow(cfg, time.Now())
 	if err != nil {
 		return tableDumpOutput{}, err
 	}
-	progressf(progress, "[-] counting rows in %s over %s...", cfg.DumpTable, cfg.DumpLookback)
+	return dumpTableAt(ctx, source, cfg, window, pseudonyms, progress)
+}
+
+// dumpTableAt dumps the rows selected by a fixed window.
+func dumpTableAt(ctx context.Context, source querySource, cfg config, window dumpWindow, pseudonyms *pseudonymizer, progress io.Writer) (tableDumpOutput, error) {
+	baseQuery := buildTableDumpBaseQuery(cfg.DumpTable, cfg.DumpTimeColumn, window)
+	source, err := withTableDumpTimespan(source, cfg, window, progress)
+	if err != nil {
+		return tableDumpOutput{}, err
+	}
+	progressf(progress, "[-] counting rows in %s over %s...", cfg.DumpTable, window)
 	countResponse, err := source.RunQuery(ctx, buildTableDumpCountQuery(baseQuery), progress)
 	if err != nil {
 		return tableDumpOutput{}, fmt.Errorf("count rows in %s: %w", cfg.DumpTable, err)
@@ -148,7 +198,7 @@ func writeEmptyPartitionedResult(cfg config, key queryPartitionKey, stats tableD
 // withTableDumpTimespan gives sources with a service-side time range one that
 // covers the fixed dump window. That range filters TimeGenerated, so it is not
 // sent for another time column, where it could drop rows the query selects.
-func withTableDumpTimespan(source querySource, cfg config, cutoff time.Time, progress io.Writer) (querySource, error) {
+func withTableDumpTimespan(source querySource, cfg config, window dumpWindow, progress io.Writer) (querySource, error) {
 	windowed, ok := source.(timespanQuerySource)
 	if !ok {
 		return source, nil
@@ -157,15 +207,10 @@ func withTableDumpTimespan(source querySource, cfg config, cutoff time.Time, pro
 		progressf(progress, "[i] not sending a service timespan because the dump filters on %s rather than %s", cfg.DumpTimeColumn, logAnalyticsTimeColumn)
 		return source, nil
 	}
-	lookback, err := kqlTimespanDuration(cfg.DumpLookback)
-	if err != nil {
-		return nil, err
-	}
 	// The query filter stays authoritative. The service applies the timespan
 	// as a half-open [start, end) range on TimeGenerated, like the query; one
 	// second of padding only guards against rounding of the timespan values.
-	end := cutoff.UTC().Truncate(time.Microsecond)
-	return windowed.withTimespan(end.Add(-lookback-time.Second), end.Add(time.Second)), nil
+	return windowed.withTimespan(window.Start.Add(-time.Second), window.End.Add(time.Second)), nil
 }
 
 func resolveQueryPartitionsStartingAt(ctx context.Context, source querySource, cfg config, baseQuery string, key queryPartitionKey, totalRows, minimumPartitions int, description string, progress io.Writer) ([]partitionCount, int, error) {
@@ -562,14 +607,18 @@ func createTempFileForPath(path string) (*os.File, string, error) {
 	return file, file.Name(), nil
 }
 
-func buildTableDumpBaseQuery(tableName, timeColumn, lookback string, cutoff time.Time) string {
-	// Kusto datetime precision is 100 ns; use microseconds so Go's nanosecond
-	// formatting never produces an unsupported nine-digit fractional second.
-	end := cutoff.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
+func buildTableDumpBaseQuery(tableName, timeColumn string, window dumpWindow) string {
+	start := kqlDatetime(window.Start)
+	end := kqlDatetime(window.End)
 	// Rows keep arriving for hours after their event time. Excluding rows
 	// ingested after the cutoff gives every request the same snapshot. A row
 	// without an ingestion time is kept rather than silently dropped.
-	return fmt.Sprintf("%s\n| where %s >= (datetime(%s) - %s) and %s < datetime(%s)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(%s)", tableName, timeColumn, end, lookback, timeColumn, end, end)
+	return fmt.Sprintf("%s\n| where %s >= datetime(%s) and %s < datetime(%s)\n| where isnull(ingestion_time()) or ingestion_time() < datetime(%s)", tableName, timeColumn, start, timeColumn, end, kqlDatetime(window.IngestedBefore))
+}
+
+// kqlDatetime formats a UTC datetime literal at a precision Kusto supports.
+func kqlDatetime(value time.Time) string {
+	return value.UTC().Truncate(time.Microsecond).Format(time.RFC3339Nano)
 }
 
 func buildTableDumpCountQuery(baseQuery string) string {
