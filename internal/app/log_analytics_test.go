@@ -196,12 +196,17 @@ func TestLogAnalyticsTableDumpCountsThenPartitionsThroughRun(t *testing.T) {
 		t.Fatalf("expected count, schema, partition count, and two downloads; got %d requests", len(*requests))
 	}
 
-	windowPattern := regexp.MustCompile(`^SigninLogs\n\| where TimeGenerated >= \(datetime\(([^)]+)\) - 1d\) and TimeGenerated < datetime\(([^)]+)\)`)
+	windowPattern := regexp.MustCompile(`^SigninLogs\n\| where TimeGenerated >= datetime\(([^)]+)\) and TimeGenerated < datetime\(([^)]+)\)`)
 	var timespan string
 	for _, request := range *requests {
 		match := windowPattern.FindStringSubmatch(request.Query)
-		if match == nil || match[1] != match[2] {
+		if match == nil {
 			t.Fatalf("query does not filter the fixed TimeGenerated window: %q", request.Query)
+		}
+		start, startErr := time.Parse(time.RFC3339Nano, match[1])
+		stop, stopErr := time.Parse(time.RFC3339Nano, match[2])
+		if startErr != nil || stopErr != nil || stop.Sub(start) != 24*time.Hour {
+			t.Fatalf("query window is not one day: %q", request.Query)
 		}
 		if !strings.Contains(request.Query, "\n| where isnull(ingestion_time()) or ingestion_time() < datetime("+match[2]+")") {
 			t.Fatalf("query is not bounded by the ingestion-time cutoff: %q", request.Query)

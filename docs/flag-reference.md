@@ -16,12 +16,20 @@ This page lists every flag registered by the application. Follow the guide link 
 | `--query-file` | path | empty | Read the KQL query from a UTF-8 text file. | [Queries](queries-and-dumps.md#--query-file) |
 | `--dump-table` | identifier | empty | Collect a whole advanced hunting or Log Analytics table over a lookback window. | [Table dumps](queries-and-dumps.md#--dump-table) |
 | `--dump-lookback` | KQL timespan | `30d` | Set the time window for a table dump. | [Table dumps](queries-and-dumps.md#--dump-lookback) |
+| `--dump-start` | RFC 3339 timestamp | empty | Start a table dump window at a fixed time (inclusive); replaces `--dump-lookback`. | [Table dumps](queries-and-dumps.md#--dump-start-and---dump-end) |
+| `--dump-end` | RFC 3339 timestamp | collection start | End a table dump window at a fixed time (exclusive). | [Table dumps](queries-and-dumps.md#--dump-start-and---dump-end) |
+| `--dump-ingested-before` | RFC 3339 timestamp | collection start | Exclude rows ingested at or after this time from a table dump. | [Table dumps](queries-and-dumps.md#--dump-ingested-before) |
 | `--dump-time-column` | identifier | `Timestamp` | Select the table column used for lookback filtering. | [Table dumps](queries-and-dumps.md#--dump-time-column) |
 | `--dump-row-limit` | integer `1`-`100000` | `30000` | Set the query and table-dump threshold that triggers hash partitioning. | [Queries and dumps](queries-and-dumps.md#--dump-row-limit) |
 | `--dump-parallelism` | positive integer | `1` | Deprecated compatibility option; requests remain sequential. | [Table dumps](queries-and-dumps.md#--dump-parallelism) |
 | `--output` | path | `results.json` | Set the main Defender query or dump output path. | [Output](queries-and-dumps.md#--output) |
 | `--manifest` | path | empty | Create or update a collection manifest recording what each query or table dump captured. | [Manifest](queries-and-dumps.md#--manifest) |
 | `--manifest-table` | identifier | empty; required for query input with `--manifest` | Name recorded in the manifest for a query result. | [Manifest](queries-and-dumps.md#--manifest-table) |
+| `--manifest-label` | `key=value`, repeatable | none | Record a label on the whole collection in the manifest. | [Manifest](queries-and-dumps.md#--manifest-label) |
+| `--manifest-window-start` | RFC 3339 timestamp | empty | Record the inclusive start of the window a query selects. | [Manifest](queries-and-dumps.md#--manifest-window-start-and---manifest-window-end) |
+| `--manifest-window-end` | RFC 3339 timestamp | empty | Record the exclusive end of the window a query selects. | [Manifest](queries-and-dumps.md#--manifest-window-start-and---manifest-window-end) |
+| `--manifest-ingested-before` | RFC 3339 timestamp | empty | Record the ingestion-time cutoff a query applies. | [Manifest](queries-and-dumps.md#--manifest-window-start-and---manifest-window-end) |
+| `--manifest-time-column` | identifier | `Timestamp`, or `TimeGenerated` with `--source loganalytics` | Record the column a declared query window applies to. | [Manifest](queries-and-dumps.md#--manifest-window-start-and---manifest-window-end) |
 | `--adx-export` | boolean | `false` | Generate ADX NDJSON and KQL sidecars for collected results. | [ADX export](azure-data-explorer.md#--adx-export) |
 | `--opengraph-export` | boolean | `false` | Generate BloodHound OpenGraph and icon sidecars. | [OpenGraph](bloodhound-and-opengraph.md#--opengraph-export) |
 | `--adx-cluster` | URI | `ADX_CLUSTER` | ADX engine cluster used for direct upload. | [ADX upload](azure-data-explorer.md#--adx-cluster) |

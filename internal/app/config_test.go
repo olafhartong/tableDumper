@@ -368,6 +368,99 @@ func TestParseFlagsRejectsUnsafeTableDumpValues(t *testing.T) {
 	}
 }
 
+func TestParseFlagsSupportsAbsoluteDumpWindow(t *testing.T) {
+	cfg, err := parseFlags([]string{
+		"--dump-table", "SigninLogs",
+		"--dump-start", "2026-09-01T02:00:00+02:00",
+		"--dump-end", "2026-09-02T00:00:00.1234567Z",
+		"--dump-ingested-before", "2026-09-02T00:00:00.1234567Z",
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	end := time.Date(2026, 9, 2, 0, 0, 0, 123456000, time.UTC)
+	if !cfg.DumpStart.Equal(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)) || cfg.DumpStart.Location() != time.UTC {
+		t.Fatalf("unexpected start %v", cfg.DumpStart)
+	}
+	if !cfg.DumpEnd.Equal(end) || !cfg.DumpIngestedBefore.Equal(end) {
+		t.Fatalf("unexpected end %v or cutoff %v", cfg.DumpEnd, cfg.DumpIngestedBefore)
+	}
+}
+
+func TestParseFlagsRejectsInvalidDumpWindow(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"start without table", []string{"--query", "T", "--dump-start", "2026-09-01T00:00:00Z"}, "-dump-start requires -dump-table"},
+		{"cutoff without table", []string{"--query", "T", "--dump-ingested-before", "2026-09-01T00:00:00Z"}, "-dump-ingested-before requires -dump-table"},
+		{"no offset", []string{"--dump-table", "T", "--dump-end", "2026-09-01T00:00:00"}, "invalid -dump-end"},
+		{"kql expression", []string{"--dump-table", "T", "--dump-end", "now()"}, "invalid -dump-end"},
+		{"start and lookback", []string{"--dump-table", "T", "--dump-start", "2026-09-01T00:00:00Z", "--dump-lookback", "1d"}, "either -dump-start or -dump-lookback"},
+		{"inverted", []string{"--dump-table", "T", "--dump-start", "2026-09-02T00:00:00Z", "--dump-end", "2026-09-01T00:00:00Z"}, "-dump-start must be before -dump-end"},
+		{"empty", []string{"--dump-table", "T", "--dump-start", "2026-09-01T00:00:00Z", "--dump-end", "2026-09-01T00:00:00Z"}, "-dump-start must be before -dump-end"},
+		{"cutoff before end", []string{"--dump-table", "T", "--dump-end", "2026-09-02T00:00:00Z", "--dump-ingested-before", "2026-09-01T23:59:59Z"}, "-dump-ingested-before must not be before -dump-end"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseFlags(tt.args, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected error containing %q, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
+func TestParseFlagsManifestLabelsAndWindow(t *testing.T) {
+	cfg, err := parseFlags([]string{
+		"--source", "loganalytics", "--workspace-id", "00000000-0000-0000-0000-000000000000",
+		"--query-file", "incident.kql", "--manifest", "manifest.json", "--manifest-table", "IncidentSignins",
+		"--manifest-label", "ticket=CHG-0042", "--manifest-label", "collected_for=2026-09-13 review",
+		"--manifest-window-start", "2026-09-12T00:00:00Z", "--manifest-window-end", "2026-09-13T09:58:12Z",
+	}, io.Discard)
+	if err != nil {
+		t.Fatalf("parseFlags returned error: %v", err)
+	}
+	if cfg.ManifestLabels["ticket"] != "CHG-0042" || cfg.ManifestLabels["collected_for"] != "2026-09-13 review" {
+		t.Fatalf("unexpected labels %#v", cfg.ManifestLabels)
+	}
+	if cfg.ManifestTimeColumn != "TimeGenerated" || !cfg.ManifestWindowEnd.Equal(time.Date(2026, 9, 13, 9, 58, 12, 0, time.UTC)) || !cfg.ManifestIngestedBefore.IsZero() {
+		t.Fatalf("unexpected window %q %v %v", cfg.ManifestTimeColumn, cfg.ManifestWindowEnd, cfg.ManifestIngestedBefore)
+	}
+}
+
+func TestParseFlagsRejectsInvalidManifestLabelsAndWindow(t *testing.T) {
+	query := []string{"--query", "T", "--manifest", "manifest.json", "--manifest-table", "T"}
+	window := []string{"--manifest-window-start", "2026-09-01T00:00:00Z", "--manifest-window-end", "2026-09-02T00:00:00Z"}
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"label without manifest", []string{"--query", "T", "--manifest-label", "a=b"}, "-manifest-label requires -manifest"},
+		{"label without value", append(append([]string{}, query...), "--manifest-label", "ticket"), "use key=value"},
+		{"empty value", append(append([]string{}, query...), "--manifest-label", "ticket="), "label values"},
+		{"unsafe key", append(append([]string{}, query...), "--manifest-label", "ticket id=1"), "label keys"},
+		{"control character", append(append([]string{}, query...), "--manifest-label", "note=a\nb"), "label values"},
+		{"repeated key", append(append([]string{}, query...), "--manifest-label", "a=1", "--manifest-label", "a=2"), "more than once"},
+		{"window on dump", append([]string{"--dump-table", "T", "--manifest", "manifest.json"}, window...), "require -manifest with -query"},
+		{"window without manifest", append([]string{"--query", "T"}, window...), "require -manifest with -query"},
+		{"start only", append(append([]string{}, query...), window[:2]...), "must be given together"},
+		{"inverted", append(append([]string{}, query...), "--manifest-window-start", "2026-09-02T00:00:00Z", "--manifest-window-end", "2026-09-01T00:00:00Z"), "must be before"},
+		{"cutoff before end", append(append(append([]string{}, query...), window...), "--manifest-ingested-before", "2026-09-01T12:00:00Z"), "must not be before"},
+		{"unsafe time column", append(append(append([]string{}, query...), window...), "--manifest-time-column", "T | take 1"), "invalid -manifest-time-column"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := parseFlags(tt.args, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("expected error containing %q, got %v", tt.want, err)
+			}
+		})
+	}
+}
+
 func TestNewHTTPClient(t *testing.T) {
 	t.Run("default transport keeps verification enabled", func(t *testing.T) {
 		client := newHTTPClient(5*time.Second, false)

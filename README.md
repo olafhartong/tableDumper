@@ -112,7 +112,7 @@ Detailed documentation for every command-line flag is available in [docs/README.
   --output incident/alerts.json --manifest incident/manifest.json --manifest-table IncidentAlerts
 ```
 
-Each run adds or replaces one table entry with status `captured`, `captured_empty`, `not_captured`, or `absent_in_source`, plus its columns, row count, window, and file hashes. With `--pseudonymize`, the manifest records the vault `key_id` and no original values. See [the manifest guide](docs/queries-and-dumps.md#--manifest).
+Each run adds or replaces one table entry with status `captured`, `captured_empty`, `not_captured`, or `absent_in_source`, plus its columns, row count, window, and file hashes. With `--pseudonymize`, the manifest records the vault `key_id` and no original values. `--manifest-label key=value` labels the collection, and `--manifest-window-start`/`--manifest-window-end` record the window a query selects. See [the manifest guide](docs/queries-and-dumps.md#--manifest).
 
 ### 8. Pseudonymize a collection
 
@@ -228,6 +228,8 @@ Example:
 ```
 
 By default, the lookback filter uses the `Timestamp` column. Use `--dump-time-column` only for tables with a different time column.
+
+Use `--dump-start` and `--dump-end` for a fixed window instead of a lookback ending now, and `--dump-ingested-before` to exclude rows ingested after a given moment. See [the table dump guide](docs/queries-and-dumps.md#--dump-start-and---dump-end).
 
 ## NER-based pseudonymization
 
@@ -490,6 +492,14 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 - Default: `30d`
 - Examples: `7d`, `12h`, `90m`
 
+`--dump-start`, `--dump-end`
+- RFC 3339 timestamps for a fixed table-dump window; start inclusive, end exclusive
+- Default: the window ends at the collection start and starts `--dump-lookback` earlier
+
+`--dump-ingested-before`
+- RFC 3339 ingestion-time cutoff for a table dump
+- Default: the collection start
+
 `--dump-time-column`
 - Table time column used for the lookback filter
 - Default: `Timestamp`, or `TimeGenerated` with `--source loganalytics`
@@ -512,6 +522,12 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 `--manifest-table`
 - Table name recorded in `--manifest` for query results
 - Required with `--manifest` and `--query`/`--query-file`
+
+`--manifest-label`
+- `key=value` label recorded on the whole collection in `--manifest`; repeatable
+
+`--manifest-window-start`, `--manifest-window-end`, `--manifest-ingested-before`, `--manifest-time-column`
+- Window and ingestion cutoff a `--query`/`--query-file` selects, recorded in `--manifest` with `"declared": true`; the query must apply them itself
 
 `--pseudonymize`
 - Apply embedded NER and identifier pseudonymization before collected data is written
@@ -644,6 +660,7 @@ The upload mode uses the ADX token audience `https://api.kusto.windows.net` by d
 - `--adx-batch-size`: defaults to `500`
 - `--dump-table`: dump an entire table by name
 - `--dump-lookback`: defaults to `30d`
+- `--dump-start`, `--dump-end`, `--dump-ingested-before`: fix the dump window and ingestion cutoff to absolute times
 - `--timeout`: defaults to `60s`
 
 `--resource` defaults to Microsoft Graph because the query mode uses the Defender XDR hunting API through Graph.

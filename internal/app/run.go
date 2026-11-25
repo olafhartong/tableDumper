@@ -74,7 +74,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 
 	var manifest *manifestRun
 	if cfg.Manifest != "" {
-		if manifest, err = openManifestRun(cfg.Manifest, pseudonyms); err != nil {
+		if manifest, err = openManifestRun(cfg.Manifest, pseudonyms, cfg.ManifestLabels); err != nil {
 			return err
 		}
 	}
@@ -85,6 +85,10 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return err
 		}
 		record := manifestResult{sourceName: cfg.Source, table: cfg.ManifestTable, query: query, outputPath: cfg.Output}
+		if !cfg.ManifestWindowStart.IsZero() {
+			record.timeColumn, record.declared = cfg.ManifestTimeColumn, true
+			record.window = &dumpWindow{Start: cfg.ManifestWindowStart, End: cfg.ManifestWindowEnd, IngestedBefore: cfg.ManifestIngestedBefore}
+		}
 
 		source, authMode, err := newQuerySource(ctx, httpClient, cfg)
 		if err != nil {
@@ -137,15 +141,20 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 
 	if cfg.DumpTable != "" {
-		cutoff := time.Now().UTC()
-		record := manifestResult{sourceName: cfg.Source, table: cfg.DumpTable, timeColumn: cfg.DumpTimeColumn, lookback: cfg.DumpLookback, cutoff: cutoff, outputPath: cfg.Output}
+		record := manifestResult{sourceName: cfg.Source, table: cfg.DumpTable, timeColumn: cfg.DumpTimeColumn, outputPath: cfg.Output}
+		window, err := resolveDumpWindow(cfg, time.Now())
+		if err != nil {
+			record.err = err
+			return manifest.Record(record)
+		}
+		record.window = &window
 		source, authMode, err := newQuerySource(ctx, httpClient, cfg)
 		if err != nil {
 			record.err = err
 			return manifest.Record(record)
 		}
 
-		output, err := dumpTableAt(ctx, source, cfg, cutoff, pseudonyms, stderr)
+		output, err := dumpTableAt(ctx, source, cfg, window, pseudonyms, stderr)
 		record.source, record.output, record.err = source, output, err
 		if err := manifest.Record(record); err != nil {
 			return err
@@ -154,7 +163,7 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			fmt.Fprintf(stderr, "[i] recorded %s in manifest %s\n", cfg.DumpTable, cfg.Manifest)
 		}
 
-		message := fmt.Sprintf("[=] Done! Dumped %d rows from %s over %s to %s using %s authentication", output.Rows, cfg.DumpTable, cfg.DumpLookback, cfg.Output, authMode)
+		message := fmt.Sprintf("[=] Done! Dumped %d rows from %s over %s to %s using %s authentication", output.Rows, cfg.DumpTable, window, cfg.Output, authMode)
 		if output.Stats.Chunks > 1 {
 			message += fmt.Sprintf("\n[i] processed %d chunk(s) across %d hash partition(s); initial matching row count was %d", output.Stats.Chunks, output.Stats.Partitions, output.Stats.TotalRows)
 		}

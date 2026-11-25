@@ -103,9 +103,50 @@ Accepted values are simple KQL timespan literals such as:
 - `1.5h`
 - `30s`
 
-The collection captures one UTC cutoff before counting. Every table request uses the same half-open window: `Timestamp >= (datetime(cutoff) - lookback) and Timestamp < datetime(cutoff)` (with the configured time column). Every request also excludes rows ingested at or after the cutoff with `isnull(ingestion_time()) or ingestion_time() < datetime(cutoff)`, so events that arrive during the collection cannot change counts between requests. Events can be ingested hours after their event time, so a window that ends near the present misses events that have not arrived yet; use an older window when the most recent hours must be complete. Complex KQL expressions are rejected; use `--query` or `--query-file` when the selection needs a more involved time condition.
+The collection captures one UTC collection start before counting and fixes the window to absolute datetimes. Every table request uses the same half-open window: `Timestamp >= datetime(start) and Timestamp < datetime(end)` (with the configured time column), where `end` is the collection start (or [`--dump-end`](#--dump-start-and---dump-end)) and `start` is `end` minus the lookback. Every request also excludes rows ingested at or after the cutoff with `isnull(ingestion_time()) or ingestion_time() < datetime(cutoff)`, where the cutoff is the collection start (or [`--dump-ingested-before`](#--dump-ingested-before)), so events that arrive during the collection cannot change counts between requests. Events can be ingested hours after their event time, so a window that ends near the present misses events that have not arrived yet; use an older window when the most recent hours must be complete. Complex KQL expressions are rejected; use `--query` or `--query-file` when the selection needs a more involved time condition.
 
 This flag has no effect unless `--dump-table` is set.
+
+## `--dump-start` and `--dump-end`
+
+Fix a table dump window to absolute times instead of a window ending at the collection start. Both take an RFC 3339 timestamp with an explicit offset, such as `2026-09-13T09:58:12Z` or `2026-09-13T11:58:12+02:00`; values are converted to UTC and truncated to microseconds. Default: empty.
+
+```bash
+./tableDumper \
+  --auth azcli \
+  --source loganalytics \
+  --workspace-id <workspace-id> \
+  --dump-table SigninLogs \
+  --dump-start 2026-09-12T00:00:00Z \
+  --dump-end 2026-09-13T09:58:12Z \
+  --output signinlogs.json
+```
+
+- `--dump-start` is inclusive and `--dump-end` exclusive, like the lookback window.
+- Without `--dump-end`, the window ends at the collection start.
+- Without `--dump-start`, the window starts `--dump-lookback` before its end, so `--dump-end 2026-09-13T00:00:00Z --dump-lookback 1d` selects one day. `--dump-start` cannot be combined with an explicit `--dump-lookback`.
+- The start must be before the end, and the end must not be after the ingestion cutoff (see [`--dump-ingested-before`](#--dump-ingested-before)). With the default cutoff, the end therefore cannot lie in the future.
+
+Both flags require `--dump-table`. Free-form queries define their own time range.
+
+## `--dump-ingested-before`
+
+Sets the ingestion-time cutoff of a table dump: rows ingested at or after it are excluded. It takes an RFC 3339 timestamp like [`--dump-end`](#--dump-start-and---dump-end). Default: the collection start.
+
+```bash
+./tableDumper \
+  --dump-table AuditLogs \
+  --source loganalytics \
+  --workspace-id <workspace-id> \
+  --dump-start 2026-09-12T00:00:00Z \
+  --dump-end 2026-09-13T09:58:12Z \
+  --dump-ingested-before 2026-09-13T09:58:12Z \
+  --output auditlogs.json
+```
+
+Use it to reproduce what was available at an earlier moment: with a cutoff equal to `--dump-end`, a late-arriving event for the window is excluded, as it was at that time. The default instead includes every event ingested before the collection started.
+
+The cutoff must not be before the window end, because a window that extends past its cutoff would mix complete and incomplete periods, and it must not be after the collection start, because rows could still arrive during the collection. The flag requires `--dump-table`; add `| where ingestion_time() < datetime(...)` to a free-form query for the same effect.
 
 ## `--dump-time-column`
 
@@ -198,6 +239,7 @@ Example:
   "created_at": "2026-09-13T09:58:12.41Z",
   "updated_at": "2026-09-13T10:02:47.03Z",
   "pseudonymization": {"enabled": true, "mode": "irreversible", "key_id": "3f9c0a7d51e2b846"},
+  "labels": {"ticket": "CHG-0042"},
   "tables": [
     {
       "source": "defender",
@@ -231,12 +273,12 @@ Rules:
 - Entries are keyed by `source` and `name`. Re-running a table replaces its entry, including replacing a previous `captured` entry with `not_captured` when the new run fails. Tables are sorted by that key.
 - Column types use the Kusto names produced by the ADX export mapping (`string`, `datetime`, `long`, `int`, `real`, `bool`, `guid`, `decimal`, `dynamic`).
 - `file` and `adx_data_file` are relative to the manifest's directory, with forward slashes. Hashes are SHA-256 over the final published files.
-- Table dumps record `time_column` and the fixed half-open `window` used by the query. `window.ingested_before` is the ingestion-time cutoff: rows ingested at or after it were excluded, so events that arrived later for the same window are not in the collection. Query entries have no window.
+- Table dumps record `time_column` and the fixed half-open `window` used by the query. `window.ingested_before` is the ingestion-time cutoff: rows ingested at or after it were excluded, so events that arrived later for the same window are not in the collection. The window and cutoff are the values from `--dump-start`, `--dump-end`, and `--dump-ingested-before` when given. Query entries record a window only when it is declared with [`--manifest-window-start`](#--manifest-window-start-and---manifest-window-end); such a window carries `"declared": true`, because the tool does not apply it to the query.
 - The manifest is validated when it is loaded and before it is written, and saved atomically with owner-only `0600` permissions. An existing invalid manifest stops the run before any query is sent.
 - A tool `version` is the module version from the build. Local builds from a Git checkout report a pseudo-version with the commit time and revision, such as `v0.0.0-20260913095812-57c7290a1b2c`, with `+dirty` for modified trees. Builds without module or VCS information record the revision if known, otherwise `(devel)` or `unknown`.
 - Runs are not locked against each other. Do not run collections that share a manifest concurrently.
 
-With `--pseudonymize`, the manifest contains no original values: no query text, no tenant or workspace ID, and failure notes record only the failure category because service errors can echo query text. It records the vault's mode and `key_id` (never the seed), so the manifest can be matched to its vault. Every run that joins a manifest must use the same pseudonymization setup; a run with pseudonymization disabled, a different vault, or a different vault mode is rejected before it collects anything. Without `--pseudonymize`, query entries record the query text and failure notes include the error. File paths are recorded as given, so do not put identifiers in output file names.
+With `--pseudonymize`, the manifest contains no original values: no query text, no tenant or workspace ID, and failure notes record only the failure category because service errors can echo query text. It records the vault's mode and `key_id` (never the seed), so the manifest can be matched to its vault. Every run that joins a manifest must use the same pseudonymization setup; a run with pseudonymization disabled, a different vault, or a different vault mode is rejected before it collects anything. Without `--pseudonymize`, query entries record the query text and failure notes include the error. File paths and [labels](#--manifest-label) are recorded as given, so do not put identifiers in output file names or label values.
 
 An empty result cannot always prove a table is empty in the source: Log Analytics tables protected by table-level access can return no rows without an error.
 
@@ -247,6 +289,41 @@ The manifest path must differ from `--output`, every enabled ADX/OpenGraph sidec
 Sets the table name recorded in `--manifest` for a `--query` or `--query-file` result. It is required when `--manifest` is used with query input, and rejected with `--dump-table`, which records its own table name. The value must be a safe identifier: letters or underscore first, followed by letters, digits, or underscores.
 
 A query result is recorded as `absent_in_source` only when the source reports that a table with exactly this name does not exist. A missing table under a different name in the query is recorded as `not_captured`.
+
+## `--manifest-label`
+
+Records a `key=value` label on the whole collection in `--manifest`. Repeat the flag for several labels. Default: none.
+
+```bash
+./tableDumper --dump-table DeviceProcessEvents --dump-lookback 7d \
+  --output collection/device-process-events.json --manifest collection/manifest.json \
+  --manifest-label ticket=CHG-0042 --manifest-label purpose=review
+```
+
+- Keys start with a letter or underscore and contain at most 64 letters, digits, underscores, dots, or hyphens.
+- Values are 1 to 256 bytes of printable text.
+- Labels are stored in the manifest's top-level `labels` object. A run may add new labels and need not repeat existing ones, but a run that gives an existing label a different value is rejected before it collects anything, because labels describe the whole collection.
+
+Labels are recorded verbatim, also with `--pseudonymize`. Do not put user names, host names, tenant IDs, or other identifiers in them.
+
+## `--manifest-window-start` and `--manifest-window-end`
+
+Record the time window that a `--query` or `--query-file` selects, so that a query entry in `--manifest` describes its window like a table dump does. Both take RFC 3339 timestamps (see [`--dump-start`](#--dump-start-and---dump-end)) and must be given together; the start is inclusive and the end exclusive. Default: no window.
+
+```bash
+./tableDumper --source loganalytics --workspace-id <workspace-id> \
+  --query-file queries/signins.kql \
+  --output collection/signins.json --manifest collection/manifest.json --manifest-table Signins \
+  --manifest-window-start 2026-09-12T00:00:00Z --manifest-window-end 2026-09-13T09:58:12Z \
+  --manifest-ingested-before 2026-09-13T09:58:12Z
+```
+
+The tool cannot rewrite an arbitrary query pipeline, so these values are recorded, not applied: the query must filter the same window itself, for example with `| where TimeGenerated >= datetime(2026-09-12T00:00:00Z) and TimeGenerated < datetime(2026-09-13T09:58:12Z) and ingestion_time() < datetime(2026-09-13T09:58:12Z)` before any aggregation. The recorded window has `"declared": true` to make that difference visible.
+
+- `--manifest-ingested-before` records the ingestion-time cutoff the query applies. It is optional and must not be before the window end.
+- `--manifest-time-column` names the column the window applies to. Default: `Timestamp`, or `TimeGenerated` with `--source loganalytics`.
+
+These flags require `--manifest` with `--query` or `--query-file`. Table dumps record their own window and reject them.
 
 ## Common combinations
 
